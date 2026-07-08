@@ -58,6 +58,17 @@ The Blackmagic **DeckLink interface headers** are vendored under
 redistributes); `libDeckLinkAPI.so` is **never linked** — it is `dlopen`ed at
 runtime, so the binary builds and runs without Desktop Video installed.
 
+### Prebuilt images
+
+CI publishes the container to GitHub Container Registry
+(`ghcr.io/leeo86/mxl-decklink`):
+
+| Tag | Meaning |
+|---|---|
+| `1.2.3`, `1.2`, `1`, `latest` | releases (git tags `v*.*.*`) |
+| `nightly-dev` | latest build from `main` |
+| `git-<sha>` | every published build, for pinning |
+
 Or build the container image (multi-stage, builds MXL internally):
 
 ```bash
