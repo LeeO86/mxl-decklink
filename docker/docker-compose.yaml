@@ -1,0 +1,58 @@
+# Example single-card deployment (SPECIFICATION.md §5): one input channel and
+# one output channel on a DeckLink Duo 2, MXL domain on the host's /dev/shm.
+services:
+  mxl-decklink:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    # §5.2: device nodes via --device (sets cgroup rules, unlike bind mounts).
+    devices:
+      - /dev/blackmagic:/dev/blackmagic
+    volumes:
+      - /dev/shm/mxl:/dev/shm/mxl # host tmpfs MXL domain
+      # DECKLINK_LIB_MODE=hostmount alternative (§5.1): match host driver
+      # - /usr/lib/libDeckLinkAPI.so:/usr/lib/libDeckLinkAPI.so:ro
+      # Optional card-global preferences (§5.2):
+      # - /etc/blackmagic/BlackmagicPreferences.xml:/etc/blackmagic/BlackmagicPreferences.xml:ro
+    # §5.3: only needed with RT_SCHED=true
+    cap_add:
+      - SYS_NICE
+      - IPC_LOCK
+    ports:
+      - "9080:9080" # /livez /readyz /statusz
+      - "9090:9090" # /metrics
+    environment:
+      MXL_DECKLINK_CARD_ID: "0xa1b2c3d4"
+      MXL_DECKLINK_CARD_PROFILE: "two-half-duplex"
+      MXL_DOMAIN_PATH: /dev/shm/mxl
+      MXL_TIMESTAMP_SOURCE: hardware
+      RT_SCHED: "true"
+      MXL_REALTIME_PRIORITY: "50"
+      MXL_HEALTH_MIN_HEALTHY_CHANNELS: "2"
+      LOG_LEVEL: info
+      LOG_FORMAT: json
+
+      CH0_DIRECTION: input
+      CH0_SUBDEVICE_INDEX: "0"
+      CH0_VIDEO_MODE: auto
+      CH0_AUDIO_CHANNEL_COUNT: "16"
+      CH0_VIDEO_ANC_ENABLE: "true"
+      CH0_MXL_VIDEO_FLOW_ID: 5fbec3b1-1b0f-417d-9059-8b94a47197ed
+      CH0_MXL_AUDIO_FLOW_ID: b3bb5be7-9fe9-4324-a5bb-4c70e1084449
+      CH0_MXL_ANC_FLOW_ID: db3bd465-2772-484f-8fac-830b0471258b
+      CH0_LABEL: studio-a-cam-1
+
+      CH1_DIRECTION: output
+      CH1_SUBDEVICE_INDEX: "1"
+      CH1_VIDEO_MODE: HD1080p50
+      CH1_AUDIO_CHANNEL_COUNT: "16"
+      CH1_MXL_VIDEO_FLOW_ID: 0e635152-e501-4d4e-bb87-9f3fe05eb79a
+      CH1_MXL_AUDIO_FLOW_ID: 9126cc2f-4c26-4c9b-a6cd-93c4381c9be5
+      CH1_LABEL: studio-a-pgm-out
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9080/readyz"]
+      interval: 5s
+      timeout: 3s
+      start_period: 30s
+      retries: 3
+    restart: unless-stopped

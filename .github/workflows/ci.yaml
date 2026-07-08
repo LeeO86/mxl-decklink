@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    env:
+      MXL_REF: v1.0.1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config curl zip unzip tar \
+            bison flex autoconf automake libtool
+
+      - name: Cache MXL install
+        id: cache-mxl
+        uses: actions/cache@v4
+        with:
+          path: |
+            /opt/mxl
+            mxl-vcpkg-installed
+          key: mxl-${{ env.MXL_REF }}-ubuntu-24.04-v1
+
+      - name: Build MXL
+        if: steps.cache-mxl.outputs.cache-hit != 'true'
+        run: |
+          git clone https://github.com/microsoft/vcpkg "$HOME/vcpkg"
+          "$HOME/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+          git clone --branch "$MXL_REF" https://github.com/dmf-mxl/mxl /tmp/mxl
+          cmake -S /tmp/mxl -B /tmp/mxl/build -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$HOME/vcpkg/scripts/buildsystems/vcpkg.cmake" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTS=OFF -DBUILD_TOOLS=OFF -DBUILD_UTILS=OFF -DBUILD_DOCS=OFF \
+            -DCMAKE_INSTALL_PREFIX=/opt/mxl
+          cmake --build /tmp/mxl/build -j"$(nproc)"
+          sudo cmake --install /tmp/mxl/build
+          cp -r /tmp/mxl/build/vcpkg_installed/x64-linux mxl-vcpkg-installed
+
+      - name: Configure and build
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            "-DCMAKE_PREFIX_PATH=/opt/mxl;$PWD/mxl-vcpkg-installed"
+          cmake --build build -j"$(nproc)"
+
+      - name: Unit tests
+        run: LD_LIBRARY_PATH=/opt/mxl/lib ./build/unit-tests
+
+      - name: Integration smoke test (mock DeckLink backend)
+        run: LD_LIBRARY_PATH=/opt/mxl/lib tests/integration/smoke.sh build/mxl-decklink

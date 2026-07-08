@@ -1,0 +1,68 @@
+name: Container
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+concurrency:
+  group: container-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # Releases (v* tags) → 1.2.3 / 1.2 / 1 plus `latest`;
+          # everything else (pushes to main, manual runs) → `nightly-dev`.
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=nightly-dev,enable=${{ !startsWith(github.ref, 'refs/tags/') }}
+            type=sha,prefix=git-
+          # `latest` only on semver release tags, never on nightly builds.
+          flavor: |
+            latest=${{ startsWith(github.ref, 'refs/tags/') }}
+          labels: |
+            org.opencontainers.image.title=mxl-decklink
+            org.opencontainers.image.description=MXL MediaFunction container for Blackmagic DeckLink
+            org.opencontainers.image.licenses=MIT
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # The build stage compiles vcpkg deps + MXL and runs the unit tests;
+          # the GHA layer cache keeps repeat builds fast.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

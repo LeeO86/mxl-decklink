@@ -1,0 +1,144 @@
+# mxl-decklink Kubernetes deployment (SPECIFICATION.md §6.5): one Deployment
+# per physical card, replicas: 1, Guaranteed QoS, atomic card assignment via
+# the generic-device-plugin resource, hostPath tmpfs MXL domain.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mxl-decklink-quad2-a
+  labels:
+    app.kubernetes.io/name: mxl-decklink
+    app.kubernetes.io/instance: quad2-a
+spec:
+  replicas: 1 # hardware-bound; never scale horizontally (§6.5)
+  strategy:
+    type: Recreate # the card is exclusive; no rolling overlap possible
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mxl-decklink
+      app.kubernetes.io/instance: quad2-a
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mxl-decklink
+        app.kubernetes.io/instance: quad2-a
+    spec:
+      nodeSelector:
+        hardware/decklink: "true"
+        # Alternative via Node Feature Discovery on the Blackmagic PCI vendor:
+        # feature.node.kubernetes.io/pci-1edb.present: "true"
+      containers:
+        - name: mxl-decklink
+          image: ghcr.io/leeo86/mxl-decklink:1.1.0
+          resources:
+            # §6.4: Guaranteed QoS — requests == limits, integer CPUs.
+            # Sizing per §6.3 (Quad 2, 8× HD half duplex).
+            requests:
+              cpu: "12"
+              memory: 4Gi
+              decklink.mxl.dev/quad2: "1"
+            limits:
+              cpu: "12"
+              memory: 4Gi
+              decklink.mxl.dev/quad2: "1"
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["SYS_NICE", "IPC_LOCK"] # §6.4: RT_SCHED=true
+          env:
+            - name: MXL_DECKLINK_CARD_ID
+              value: "0xa1b2c3d4"
+            - name: MXL_DECKLINK_CARD_PROFILE
+              value: four-half-duplex
+            - name: MXL_DOMAIN_PATH
+              value: /dev/shm/mxl
+            - name: MXL_TIMESTAMP_SOURCE
+              value: hardware
+            - name: RT_SCHED
+              value: "true"
+            - name: MXL_HEALTH_MIN_HEALTHY_CHANNELS
+              value: "1"
+            # Channels: 4 in + 4 out (Quad 2 four-half-duplex example);
+            # generate CHx_ blocks with Helm `range` in real deployments.
+            - name: CH0_DIRECTION
+              value: input
+            - name: CH0_SUBDEVICE_INDEX
+              value: "0"
+            - name: CH0_VIDEO_MODE
+              value: auto
+            - name: CH0_MXL_VIDEO_FLOW_ID
+              value: 5fbec3b1-1b0f-417d-9059-8b94a47197ed
+            - name: CH0_MXL_AUDIO_FLOW_ID
+              value: b3bb5be7-9fe9-4324-a5bb-4c70e1084449
+            - name: CH0_LABEL
+              value: ingest-1
+            - name: CH1_DIRECTION
+              value: output
+            - name: CH1_SUBDEVICE_INDEX
+              value: "1"
+            - name: CH1_VIDEO_MODE
+              value: HD1080p50
+            - name: CH1_MXL_VIDEO_FLOW_ID
+              value: 0e635152-e501-4d4e-bb87-9f3fe05eb79a
+            - name: CH1_MXL_AUDIO_FLOW_ID
+              value: 9126cc2f-4c26-4c9b-a6cd-93c4381c9be5
+            - name: CH1_LABEL
+              value: playout-1
+          ports:
+            - name: health
+              containerPort: 9080
+            - name: metrics
+              containerPort: 9090
+          # §7.1 recommended probes.
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: health
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 2
+            failureThreshold: 2
+          volumeMounts:
+            - name: mxl-domain
+              mountPath: /dev/shm/mxl
+            # Optional (§5.2):
+            # - name: bm-preferences
+            #   mountPath: /etc/blackmagic/BlackmagicPreferences.xml
+            #   readOnly: true
+      volumes:
+        # §6.2: hostPath tmpfs for cross-pod sharing; all cooperating pods
+        # need affinity to this node. See SPECIFICATION.md for alternatives
+        # (sidecar emptyDir, PV).
+        - name: mxl-domain
+          hostPath:
+            path: /dev/shm/mxl
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mxl-decklink-quad2-a
+  labels:
+    app.kubernetes.io/name: mxl-decklink
+    app.kubernetes.io/instance: quad2-a
+spec:
+  # §6.5: only ops ports — the media path is MXL shared memory, not network.
+  selector:
+    app.kubernetes.io/name: mxl-decklink
+    app.kubernetes.io/instance: quad2-a
+  ports:
+    - name: health
+      port: 9080
+      targetPort: health
+    - name: metrics
+      port: 9090
+      targetPort: metrics

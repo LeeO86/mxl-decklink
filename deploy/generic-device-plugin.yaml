@@ -1,0 +1,57 @@
+# squat/generic-device-plugin configuration for DeckLink cards
+# (SPECIFICATION.md §6.1): one group per physical card bundling all of the
+# card's sub-device nodes atomically. Individual sub-device assignment is
+# deliberately not offered.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: generic-device-plugin
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: generic-device-plugin
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: generic-device-plugin
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: generic-device-plugin
+    spec:
+      nodeSelector:
+        hardware/decklink: "true"
+      priorityClassName: system-node-critical
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: generic-device-plugin
+          image: ghcr.io/squat/generic-device-plugin:latest
+          args:
+            - --domain=decklink.mxl.dev
+            # Example: a Quad 2 with 8 sub-devices exposed as one atomic
+            # resource `decklink.mxl.dev/quad2: 1`. Adjust the node's actual
+            # /dev/blackmagic nodes; with two identical cards per node,
+            # configure two groups so capacity becomes 2.
+            - |
+              --device={"name": "quad2", "groups": [{"paths": [{"path": "/dev/blackmagic/dv0"}, {"path": "/dev/blackmagic/dv1"}, {"path": "/dev/blackmagic/dv2"}, {"path": "/dev/blackmagic/dv3"}, {"path": "/dev/blackmagic/dv4"}, {"path": "/dev/blackmagic/dv5"}, {"path": "/dev/blackmagic/dv6"}, {"path": "/dev/blackmagic/dv7"}]}]}
+          resources:
+            requests:
+              cpu: 50m
+              memory: 20Mi
+            limits:
+              cpu: 50m
+              memory: 20Mi
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: device-plugin
+              mountPath: /var/lib/kubelet/device-plugins
+            - name: dev
+              mountPath: /dev
+      volumes:
+        - name: device-plugin
+          hostPath:
+            path: /var/lib/kubelet/device-plugins
+        - name: dev
+          hostPath:
+            path: /dev
