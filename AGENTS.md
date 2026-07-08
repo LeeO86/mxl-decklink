@@ -17,26 +17,23 @@ The external MXL dependency is expensive to build and is prebuilt into the image
 so the startup update script does not rebuild it:
 
 - `/opt/mxl` — MXL v1.0.1 installed (`libmxl.so`, headers, CMake config).
-- `/opt/mxl-vcpkg` — MXL's vcpkg dependencies (`fmt`, `spdlog`, `stduuid`,
-  `picojson`), needed on `CMAKE_PREFIX_PATH` when building this app.
-- `/opt/vcpkg` — bootstrapped vcpkg (only needed to rebuild MXL).
+- `~/mxl/build/vcpkg_installed/x64-linux` — MXL's vcpkg dependencies (`fmt`,
+  `spdlog`, `stduuid`, `picojson`); put this on `CMAKE_PREFIX_PATH` when building
+  this app.
+- `~/vcpkg` — bootstrapped vcpkg (only needed to rebuild MXL).
 
-### Compiler gotcha (IMPORTANT)
-
-On this image the default `cc`/`c++` (and `/etc/alternatives`) resolve to **clang**,
-which auto-selects the **gcc-14** toolchain whose `libstdc++` dev files are not
-installed — so any build using the default compiler fails at link with
-`/usr/bin/ld: cannot find -lstdc++`. Always build with **gcc-13** by exporting
-`CC=gcc CXX=g++` and passing `-DCMAKE_CXX_COMPILER=g++` to CMake (this is also the
-compiler MXL was built with, so ABI matches).
+`libstdc++-14-dev` is installed. This matters: the default `cc`/`c++` resolve to
+clang, which auto-selects the gcc-14 toolchain — without `libstdc++-14-dev` that
+link fails with `/usr/bin/ld: cannot find -lstdc++`. With the package present, the
+default toolchain works and no `CC`/`CXX` override is needed (CMake picks up
+`g++`/gcc-13 by default here anyway).
 
 ### Build, test, run (mock backend, no hardware)
 
 ```bash
-export CC=gcc CXX=g++
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_CXX_COMPILER=g++ -DMXL_DECKLINK_BUILD_TESTS=ON \
-  "-DCMAKE_PREFIX_PATH=/opt/mxl;/opt/mxl-vcpkg"
+  -DMXL_DECKLINK_BUILD_TESTS=ON \
+  "-DCMAKE_PREFIX_PATH=/opt/mxl;$HOME/mxl/build/vcpkg_installed/x64-linux"
 cmake --build build -j"$(nproc)"
 
 # unit tests (doctest)
@@ -62,6 +59,6 @@ smaller mode/history or a larger tmpfs.
 ### If `/opt/mxl` is ever missing
 
 Rebuild it (only needed if the snapshot lost it) following `.github/workflows/ci.yaml`
-"Build MXL": clone `dmf-mxl/mxl` at `v1.0.1`, configure with the vcpkg toolchain and
-`CC=gcc CXX=g++`, install to `/opt/mxl`, and copy `build/vcpkg_installed/x64-linux`
-to `/opt/mxl-vcpkg`.
+"Build MXL": clone `dmf-mxl/mxl` at `v1.0.1`, configure with the `~/vcpkg` toolchain,
+install to `/opt/mxl`, and keep `build/vcpkg_installed/x64-linux` for
+`CMAKE_PREFIX_PATH`.
