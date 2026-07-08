@@ -197,9 +197,12 @@ int main()
         });
 
         channels.stopAll(); // steps 1–4: stop streams, flush, disable, release writers/readers
+        mxldl::log::debug("shutdown_stage", {{"stage", "channels_stopped"}});
         housekeeping.stop();
         health.stop();
+        mxldl::log::debug("shutdown_stage", {{"stage", "ops_stopped"}});
         domain.reset(); // step 5: mxlDestroyInstance
+        mxldl::log::debug("shutdown_stage", {{"stage", "mxl_destroyed"}});
         card.reset(); // step 6: release DeckLink refs
 
         shutdownDone.store(true);

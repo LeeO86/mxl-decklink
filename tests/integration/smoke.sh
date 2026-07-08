@@ -108,7 +108,7 @@ rc=$?
 
 # ---------------------------------------------------------------------------
 say "test 2: end-to-end input+output channels on the mock card"
-LOG="$DOMAIN/../mxl-smoke-$$.log"
+LOG="/tmp/mxl-smoke-$$.log"
 common_env "$BIN" >"$LOG" 2>&1 &
 PID=$!
 
@@ -183,7 +183,7 @@ PID=""
 # ---------------------------------------------------------------------------
 say "test 4: signal loss degrades /readyz without killing the process"
 rm -rf "$DOMAIN"; DOMAIN=$(mktemp -d /dev/shm/mxl-smoke.XXXXXX)
-LOG2="$DOMAIN/../mxl-smoke-loss-$$.log"
+LOG2="/tmp/mxl-smoke-loss-$$.log"
 common_env \
     MXL_HEALTH_MIN_HEALTHY_CHANNELS=2 \
     MOCK_SIGNAL_LOSS_AFTER_FRAMES=150 \
@@ -222,7 +222,55 @@ kill -TERM "$PID" 2>/dev/null
 wait "$PID" 2>/dev/null
 PID=""
 
-rm -f "$LOG" "$LOG2"
+# ---------------------------------------------------------------------------
+say "test 5: auto format change replaces the video flow with a new UUID (§3.8)"
+rm -rf "$DOMAIN"; DOMAIN=$(mktemp -d /dev/shm/mxl-smoke.XXXXXX)
+# Short domain history keeps the HD1080p50 auto-start ring inside a 64 MiB /dev/shm.
+printf '{"urn:x-mxl:option:history_duration/v1.0": 100000000}' > "$DOMAIN/options.json"
+LOG3="/tmp/mxl-smoke-fc-$$.log"
+fc_env() {
+    exec env -i \
+        PATH="$PATH" LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" \
+        MXL_DECKLINK_BACKEND=mock MXL_DECKLINK_CARD_ID=0xa1b2c3d4 \
+        MXL_DOMAIN_PATH="$DOMAIN" HEALTH_PORT="$HEALTH_PORT" METRICS_PORT="$METRICS_PORT" \
+        MOCK_FORMAT_CHANGE_AFTER_FRAMES=100 MOCK_FORMAT_CHANGE_MODE=HD720p50 \
+        CH0_DIRECTION=input CH0_SUBDEVICE_INDEX=0 CH0_VIDEO_MODE=auto \
+        CH0_AUDIO_CHANNEL_COUNT=2 \
+        CH0_MXL_VIDEO_FLOW_ID=5fbec3b1-1b0f-417d-9059-8b94a47197ed \
+        CH0_MXL_AUDIO_FLOW_ID=b3bb5be7-9fe9-4324-a5bb-4c70e1084449 \
+        CH0_LABEL=smoke-fc \
+        "$BIN"
+}
+fc_env >"$LOG3" 2>&1 &
+PID=$!
+
+wait_for_readyz 30 || fail "format-change run: /readyz did not reach 200"
+# The change fires after 2 s (100 frames at 50 fps) + 5 s reader grace.
+new_flow=""
+deadline=$(( $(date +%s) + 20 ))
+while (( $(date +%s) < deadline )); do
+    flow=$(statusz_field smoke-fc active_video_flow_id 2>/dev/null) || flow=""
+    if [[ -n "$flow" && "$flow" != "5fbec3b1-1b0f-417d-9059-8b94a47197ed" ]]; then
+        new_flow="$flow"
+        break
+    fi
+    sleep 0.5
+done
+if [[ -z "$new_flow" ]]; then
+    fail "video flow UUID was not replaced after the format change"
+else
+    say "flow replaced: 5fbec3b1-… → $new_flow"
+fi
+wait_for_readyz 15 || fail "format-change run: channel did not return to healthy"
+grep -q '"event":"video_flow_replaced"' "$LOG3" || fail "video_flow_replaced event not logged"
+
+kill -TERM "$PID" 2>/dev/null
+wait "$PID" 2>/dev/null
+rc=$?
+[[ $rc == 0 ]] || fail "format-change run: expected exit 0 on SIGTERM, got $rc"
+PID=""
+
+rm -f "$LOG" "$LOG2" "$LOG3"
 
 # ---------------------------------------------------------------------------
 if (( FAILURES > 0 )); then
