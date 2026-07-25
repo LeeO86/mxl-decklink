@@ -289,6 +289,24 @@ namespace mxldl::mxlbridge
         return out;
     }
 
+    bool pathIsUnderRoot(std::string const& path, std::string const& root)
+    {
+        std::error_code ec;
+        auto const rootCanon = fs::weakly_canonical(root, ec);
+        if (ec || rootCanon.empty())
+        {
+            return false;
+        }
+        auto const target = fs::weakly_canonical(fs::path(path), ec);
+        if (ec || target.empty())
+        {
+            return false;
+        }
+        auto const rootStr = rootCanon.string();
+        auto const targetStr = target.string();
+        return targetStr == rootStr || targetStr.rfind(rootStr + "/", 0) == 0;
+    }
+
     std::variant<CreateDomainResult, std::string> createDomain(CreateDomainRequest const& request, std::string const& scanRoot)
     {
         std::error_code ec;
@@ -307,7 +325,7 @@ namespace mxldl::mxlbridge
         }
         auto const rootStr = rootCanon.string();
         auto const targetStr = target.string();
-        if (targetStr != rootStr && targetStr.rfind(rootStr + "/", 0) != 0)
+        if (!pathIsUnderRoot(targetStr, rootStr))
         {
             return "domain path must be inside the scan root " + rootStr;
         }

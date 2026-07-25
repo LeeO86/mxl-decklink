@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT
 #include "webapi.hpp"
 
+#include <filesystem>
 #include <sstream>
+#include <system_error>
 
 #include <picojson/picojson.h>
 
@@ -310,11 +312,18 @@ namespace mxldl::ops
                 }
                 else if (value.is<double>())
                 {
-                    rendered = std::to_string(static_cast<long long>(value.get<double>()));
+                    // Match the config-file loader: only whole numbers (picojson
+                    // has no integer type; reject 1.5 rather than truncating).
+                    double const d = value.get<double>();
+                    if (d != static_cast<double>(static_cast<long long>(d)))
+                    {
+                        return jsonError(400, "value for '" + key + "' must be a string/integer/bool");
+                    }
+                    rendered = std::to_string(static_cast<long long>(d));
                 }
                 else
                 {
-                    return jsonError(400, "value for '" + key + "' must be string/number/bool");
+                    return jsonError(400, "value for '" + key + "' must be a string/integer/bool");
                 }
                 changes[key] = rendered;
             }
@@ -450,9 +459,19 @@ namespace mxldl::ops
 
     HttpResponse WebService::apiFlowsGet(HttpRequest const& req)
     {
-        auto const domain = req.queryParam("domain").value_or(_domain.path());
-        // Containment: only domains under the scan root (or the active one).
-        if (domain != _domain.path() && domain.rfind(_activeCfg.domainScanPath, 0) != 0)
+        auto const rawDomain = req.queryParam("domain").value_or(_domain.path());
+        // Containment: only the active domain, or a path that canonicalizes
+        // under the scan root (rejects `..` traversal and non-segment prefixes).
+        std::error_code ec;
+        auto const domainCanon = std::filesystem::weakly_canonical(rawDomain, ec);
+        if (ec || domainCanon.empty())
+        {
+            return jsonError(400, "invalid domain path");
+        }
+        auto const domain = domainCanon.string();
+        auto const activeCanon = std::filesystem::weakly_canonical(_domain.path(), ec);
+        bool const isActive = !ec && !activeCanon.empty() && domainCanon == activeCanon;
+        if (!isActive && !mxlbridge::pathIsUnderRoot(domain, _activeCfg.domainScanPath))
         {
             return jsonError(400, "domain must be inside MXL_DOMAIN_SCAN_PATH");
         }

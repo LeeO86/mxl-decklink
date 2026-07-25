@@ -155,3 +155,24 @@ TEST_CASE("domain creation writes markers and enforces containment (§7.6)")
     auto const dup = createDomain(req, root.path.string());
     REQUIRE(std::holds_alternative<std::string>(dup));
 }
+
+TEST_CASE("pathIsUnderRoot rejects traversal and non-segment prefixes")
+{
+    TempRoot root;
+    auto const inside = (root.path / "child").string();
+    fs::create_directories(inside);
+
+    CHECK(pathIsUnderRoot(inside, root.path.string()));
+    CHECK(pathIsUnderRoot(root.path.string(), root.path.string()));
+    CHECK(pathIsUnderRoot((root.path / "child" / ".." / "child").string(), root.path.string()));
+
+    // `..` that leaves the root.
+    CHECK_FALSE(pathIsUnderRoot((root.path / ".." / "outside").string(), root.path.string()));
+
+    // Non-segment prefix: /tmp/foo must not match /tmp/foobar.
+    auto const sibling = root.path.string() + "-evil";
+    fs::create_directories(sibling);
+    CHECK_FALSE(pathIsUnderRoot(sibling, root.path.string()));
+    std::error_code ec;
+    fs::remove_all(sibling, ec);
+}

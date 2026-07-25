@@ -1,8 +1,20 @@
 // REST client for the mxl-decklink API (SPECIFICATION.md §7.5.6).
 async function request(path, options = {}) {
-  const resp = await fetch(path, options);
-  const data = await resp.json();
-  return data;
+  const headers = { ...(options.headers || {}) };
+  if (options.body != null && !headers["Content-Type"] && !headers["content-type"]) {
+    headers["Content-Type"] = "application/json";
+  }
+  const resp = await fetch(path, { ...options, headers });
+  const ct = resp.headers.get("content-type") || "";
+  if (ct.includes("application/json")) {
+    // Server error bodies are also JSON (`{error:…}`); callers check that field.
+    return resp.json();
+  }
+  const text = await resp.text();
+  if (!resp.ok) {
+    throw new Error(`${resp.status} ${resp.statusText}: ${text.slice(0, 200)}`);
+  }
+  throw new Error(`Expected JSON from ${path}, got ${ct || "unknown type"}`);
 }
 
 export const api = {

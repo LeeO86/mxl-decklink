@@ -75,4 +75,9 @@ namespace mxldl::mxlbridge
     /// (generated id + label/description), optional options.json. Fails when
     /// the path escapes `scanRoot` or a domain already exists there.
     std::variant<CreateDomainResult, std::string> createDomain(CreateDomainRequest const& request, std::string const& scanRoot);
+
+    /// True when `path` resolves (via weakly_canonical) to `root` or a
+    /// subdirectory of it. Rejects `..` traversal and non-segment prefix
+    /// matches (e.g. `/dev/shm-evil` does not count as under `/dev/shm`).
+    bool pathIsUnderRoot(std::string const& path, std::string const& root);
 }

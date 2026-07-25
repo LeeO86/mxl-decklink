@@ -214,8 +214,8 @@ namespace mxldl::ops
         std::size_t const sp2 = requestLine.find(' ', sp1 + 1);
         if (sp1 == std::string::npos || sp2 == std::string::npos || headerEnd == std::string::npos)
         {
-            resp = {404, "text/plain; charset=utf-8", "bad request\n"};
-            std::string const errOut = "HTTP/1.1 404 Not Found\r\nContent-Length: 12\r\nConnection: close\r\n\r\nbad request\n";
+            // Malformed request line / missing header terminator — not a missing route.
+            std::string const errOut = "HTTP/1.1 400 Bad Request\r\nContent-Length: 12\r\nConnection: close\r\n\r\nbad request\n";
             ::send(fd, errOut.data(), errOut.size(), MSG_NOSIGNAL);
             return;
         }
