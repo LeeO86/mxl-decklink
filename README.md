@@ -92,25 +92,39 @@ docker build -f docker/Dockerfile \
 ## Running
 
 Host prerequisites (§5.4): Blackmagic Desktop Video ≥ 16.0 with the
-`blackmagic`/`blackmagic-io` kernel modules loaded, a tmpfs MXL domain
-(default `/dev/shm/mxl`), and TAI-disciplined system time (chrony with a
-correct kernel TAI offset).
+`blackmagic`/`blackmagic-io` kernel modules loaded, a tmpfs MXL domain, and
+TAI-disciplined system time (chrony with a correct kernel TAI offset).
 
-Two deployment lessons from field testing (details in SPECIFICATION.md §5 and
-`docker/docker-compose.yaml`):
+Recommended host tmpfs (CBC [`mxl-hands-on`](https://github.com/cbcrc/mxl-hands-on)
+pattern — see `docker/docker-compose.yaml` for the full Compose example):
 
-- **Run the container as the uid/gid that owns the MXL domain directory**
-  (e.g. `user: "1000:1000"` in compose). All containers sharing a domain must
-  agree on ownership, because MXL flows are plain files in the shared tmpfs.
-- **Prefer `DECKLINK_LIB_MODE=hostmount`** (bind-mount the host's
-  `libDeckLinkAPI.so` read-only) over the bundled library: the bundled `.deb`
-  only works when it exactly matches the host driver version.
+```bash
+sudo mkdir -p /Volumes/mxl && sudo chown 1000:1000 /Volumes/mxl
+echo 'tmpfs /Volumes/mxl tmpfs defaults,noatime,size=8G,uid=1000,gid=1000,mode=0755 0 0' \
+  | sudo tee -a /etc/fstab
+sudo mount /Volumes/mxl
+mkdir -p /Volumes/mxl/mxl
+```
 
-Minimal single-channel example:
+Deployment lessons from field testing (details in SPECIFICATION.md §5):
+
+- **Run as the uid/gid that owns the MXL domain** (e.g. `user: "1000:1000"`)
+  and add the host `video` group (`group_add: [video]`) so `/dev/blackmagic`
+  (`root:video` 0660) is accessible.
+- **Prefer `DECKLINK_LIB_MODE=hostmount`** — bind-mount the host's
+  `libDeckLinkAPI.so` read-only (path often
+  `/usr/lib/x86_64-linux-gnu/libDeckLinkAPI.so` on Debian/Ubuntu; confirm with
+  `find /usr -name 'libDeckLinkAPI.so'`). The bundled `.deb` only works when it
+  exactly matches the host driver version.
+- **Mount a dedicated MXL tmpfs** (`/Volumes/mxl`), not the host's whole
+  `/dev/shm`, so unrelated shared-memory files stay out of the container.
+  Mount only one domain subdirectory when sibling discovery is not needed.
+
+Minimal single-channel example (local/CI can keep using `/dev/shm/mxl`):
 
 ```bash
 MXL_DECKLINK_CARD_ID=0xa1b2c3d4 \
-MXL_DOMAIN_PATH=/dev/shm/mxl \
+MXL_DOMAIN_PATH=/Volumes/mxl/mxl \
 CH0_DIRECTION=input \
 CH0_SUBDEVICE_INDEX=0 \
 CH0_VIDEO_MODE=auto \
@@ -118,7 +132,6 @@ CH0_MXL_VIDEO_FLOW_ID=5fbec3b1-1b0f-417d-9059-8b94a47197ed \
 CH0_MXL_AUDIO_FLOW_ID=b3bb5be7-9fe9-4324-a5bb-4c70e1084449 \
 ./build/mxl-decklink
 ```
-
 The full variable reference is SPECIFICATION.md §4 (global) and §4.2
 (per-channel `CHx_*`). Docker Compose and Kubernetes examples live in
 [`docker/docker-compose.yaml`](docker/docker-compose.yaml),
