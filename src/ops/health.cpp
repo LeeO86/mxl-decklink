@@ -18,14 +18,14 @@ namespace mxldl::ops
     {
         _healthServer = std::make_unique<HttpServer>(
             _cfg.healthPort,
-            [this](std::string const& path) {
-                return handleHealth(path);
+            [this](HttpRequest const& req) {
+                return handleHealth(req.path);
             },
             "http-health");
         _metricsServer = std::make_unique<HttpServer>(
             _cfg.metricsPort,
-            [this](std::string const& path) {
-                return handleMetrics(path);
+            [this](HttpRequest const& req) {
+                return handleMetrics(req.path);
             },
             "http-metrics");
         _healthServer->start();
@@ -106,8 +106,8 @@ namespace mxldl::ops
                 body += ',';
             }
             first = false;
-            body += "{\"index\":" + std::to_string(v.cfg->index) + ",\"label\":\"" + log::jsonEscape(v.cfg->label) + "\",\"state\":\"" +
-                    channel::stateName(v.status->state.load()) + "\"}";
+            body += "{\"index\":" + std::to_string(v.cfg.index) + ",\"label\":\"" + log::jsonEscape(v.cfg.label) + "\",\"state\":\"" +
+                    channel::stateName(v.state) + "\"}";
         }
         body += "]}";
         return {503, "application/json", body};
@@ -125,18 +125,19 @@ namespace mxldl::ops
                 body += ',';
             }
             first = false;
-            body += "{\"index\":" + std::to_string(v.cfg->index);
-            body += ",\"label\":\"" + log::jsonEscape(v.cfg->label) + "\"";
-            body += ",\"direction\":\"" + std::string(config::directionName(v.cfg->direction)) + "\"";
-            body += ",\"subdevice_index\":" + std::to_string(v.cfg->subdeviceIndex);
-            body += ",\"state\":\"" + std::string(channel::stateName(v.status->state.load())) + "\"";
-            body += ",\"signal_locked\":" + std::string(v.status->signalLocked.load() ? "true" : "false");
-            body += ",\"last_frame_tai_ns\":" + std::to_string(v.status->lastFrameTaiNs.load());
-            body += ",\"frames_total\":" + std::to_string(v.status->framesTotal.load());
-            body += ",\"frames_dropped\":" + std::to_string(v.status->framesDropped.load());
-            body += ",\"reconnects\":" + std::to_string(v.status->reconnects.load());
-            body += ",\"grains_committed\":" + std::to_string(v.status->grainsCommitted.load());
-            body += ",\"active_video_flow_id\":\"" + v.status->activeVideoFlowId() + "\"";
+            body += "{\"index\":" + std::to_string(v.cfg.index);
+            body += ",\"label\":\"" + log::jsonEscape(v.cfg.label) + "\"";
+            body += ",\"direction\":\"" + std::string(config::directionName(v.cfg.direction)) + "\"";
+            body += ",\"subdevice_index\":" + std::to_string(v.cfg.subdeviceIndex);
+            body += ",\"state\":\"" + std::string(channel::stateName(v.state)) + "\"";
+            body += ",\"signal_locked\":" + std::string(v.signalLocked ? "true" : "false");
+            body += ",\"active_video_mode\":\"" + log::jsonEscape(v.activeModeName) + "\"";
+            body += ",\"last_frame_tai_ns\":" + std::to_string(v.lastFrameTaiNs);
+            body += ",\"frames_total\":" + std::to_string(v.framesTotal);
+            body += ",\"frames_dropped\":" + std::to_string(v.framesDropped);
+            body += ",\"reconnects\":" + std::to_string(v.reconnects);
+            body += ",\"grains_committed\":" + std::to_string(v.grainsCommitted);
+            body += ",\"active_video_flow_id\":\"" + v.activeVideoFlowId + "\"";
             body += "}";
         }
         body += "]}";

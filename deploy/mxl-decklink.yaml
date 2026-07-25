@@ -91,6 +91,11 @@ spec:
               containerPort: 9080
             - name: metrics
               containerPort: 9090
+            # Web control interface (§7.5). Unauthenticated — expose only via
+            # an authenticating ingress, or set WEB_ENABLE=false for fixed
+            # installations.
+            - name: web
+              containerPort: 8080
           # §7.1 recommended probes.
           livenessProbe:
             httpGet:

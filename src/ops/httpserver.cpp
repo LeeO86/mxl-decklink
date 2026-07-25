@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT
 #include "httpserver.hpp"
 
+#include <cctype>
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 
@@ -115,26 +117,93 @@ namespace mxldl::ops
         }
     }
 
+    std::optional<std::string> HttpRequest::queryParam(std::string const& name) const
+    {
+        std::size_t pos = 0;
+        while (pos < query.size())
+        {
+            std::size_t end = query.find('&', pos);
+            if (end == std::string::npos)
+            {
+                end = query.size();
+            }
+            std::string const pair = query.substr(pos, end - pos);
+            std::size_t const eq = pair.find('=');
+            std::string const key = eq == std::string::npos ? pair : pair.substr(0, eq);
+            if (key == name)
+            {
+                std::string raw = eq == std::string::npos ? "" : pair.substr(eq + 1);
+                // Percent decoding (+ = space).
+                std::string out;
+                out.reserve(raw.size());
+                for (std::size_t i = 0; i < raw.size(); ++i)
+                {
+                    if (raw[i] == '+')
+                    {
+                        out += ' ';
+                    }
+                    else if (raw[i] == '%' && i + 2 < raw.size())
+                    {
+                        auto const hex = raw.substr(i + 1, 2);
+                        out += static_cast<char>(std::strtol(hex.c_str(), nullptr, 16));
+                        i += 2;
+                    }
+                    else
+                    {
+                        out += raw[i];
+                    }
+                }
+                return out;
+            }
+            pos = end + 1;
+        }
+        return std::nullopt;
+    }
+
     void HttpServer::handleConnection(int fd)
     {
-        // Read the request head (bounded, with a small timeout).
+        // Read the request head + body (bounded, with a small timeout).
         timeval tv{};
         tv.tv_sec = 3;
         ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
+        constexpr std::size_t kMaxRequest = 1 << 20; // config PUTs stay small
         std::string request;
-        char buf[2048];
-        while (request.size() < 16384)
+        char buf[4096];
+        std::size_t headerEnd = std::string::npos;
+        std::size_t contentLength = 0;
+        while (request.size() < kMaxRequest)
         {
+            if (headerEnd != std::string::npos && request.size() >= headerEnd + 4 + contentLength)
+            {
+                break;
+            }
             ssize_t const n = ::recv(fd, buf, sizeof(buf), 0);
             if (n <= 0)
             {
                 break;
             }
             request.append(buf, static_cast<std::size_t>(n));
-            if (request.find("\r\n\r\n") != std::string::npos)
+            if (headerEnd == std::string::npos)
             {
-                break;
+                headerEnd = request.find("\r\n\r\n");
+                if (headerEnd != std::string::npos)
+                {
+                    // Parse Content-Length from the header block.
+                    std::string headers = request.substr(0, headerEnd);
+                    for (auto& c : headers)
+                    {
+                        c = static_cast<char>(::tolower(c));
+                    }
+                    if (auto const p = headers.find("content-length:"); p != std::string::npos)
+                    {
+                        contentLength = static_cast<std::size_t>(::strtoul(headers.c_str() + p + 15, nullptr, 10));
+                        if (contentLength > kMaxRequest)
+                        {
+                            break;
+                        }
+                    }
+                }
             }
         }
 
@@ -143,29 +212,37 @@ namespace mxldl::ops
         std::string const requestLine = lineEnd == std::string::npos ? request : request.substr(0, lineEnd);
         std::size_t const sp1 = requestLine.find(' ');
         std::size_t const sp2 = requestLine.find(' ', sp1 + 1);
-        if (sp1 == std::string::npos || sp2 == std::string::npos)
+        if (sp1 == std::string::npos || sp2 == std::string::npos || headerEnd == std::string::npos)
         {
             resp = {404, "text/plain; charset=utf-8", "bad request\n"};
+            std::string const errOut = "HTTP/1.1 404 Not Found\r\nContent-Length: 12\r\nConnection: close\r\n\r\nbad request\n";
+            ::send(fd, errOut.data(), errOut.size(), MSG_NOSIGNAL);
+            return;
+        }
+
+        HttpRequest req;
+        req.method = requestLine.substr(0, sp1);
+        req.path = requestLine.substr(sp1 + 1, sp2 - sp1 - 1);
+        if (auto const q = req.path.find('?'); q != std::string::npos)
+        {
+            req.query = req.path.substr(q + 1);
+            req.path.resize(q);
+        }
+        if (request.size() >= headerEnd + 4)
+        {
+            req.body = request.substr(headerEnd + 4, contentLength);
+        }
+
+        if (req.method != "GET" && req.method != "HEAD" && req.method != "POST" && req.method != "PUT")
+        {
+            resp = {405, "text/plain; charset=utf-8", "method not allowed\n"};
         }
         else
         {
-            std::string const method = requestLine.substr(0, sp1);
-            std::string path = requestLine.substr(sp1 + 1, sp2 - sp1 - 1);
-            if (auto const q = path.find('?'); q != std::string::npos)
+            resp = _handler(req);
+            if (req.method == "HEAD")
             {
-                path.resize(q);
-            }
-            if (method != "GET" && method != "HEAD")
-            {
-                resp = {405, "text/plain; charset=utf-8", "method not allowed\n"};
-            }
-            else
-            {
-                resp = _handler(path);
-                if (method == "HEAD")
-                {
-                    resp.body.clear();
-                }
+                resp.body.clear();
             }
         }
 

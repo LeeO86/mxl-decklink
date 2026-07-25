@@ -32,6 +32,9 @@ services:
       - /usr/lib/libDeckLinkAPI.so:/usr/lib/libDeckLinkAPI.so:ro
       # Optional card-global preferences (§5.2):
       # - /etc/blackmagic/BlackmagicPreferences.xml:/etc/blackmagic/BlackmagicPreferences.xml:ro
+      # Config volume (§4.5): the web interface persists settings here; the
+      # directory must be writable by the container user above.
+      - ./mxl-decklink-config:/config
     # §5.3: only needed with RT_SCHED=true
     cap_add:
       - SYS_NICE
@@ -39,8 +42,11 @@ services:
     ports:
       - "9080:9080" # /livez /readyz /statusz
       - "9090:9090" # /metrics
+      - "8080:8080" # web control interface (§7.5) — protected networks only!
     environment:
       DECKLINK_LIB_MODE: hostmount # see the libDeckLinkAPI.so mount above
+      MXL_CONFIG_FILE: /config/mxl-decklink.json # §4.5 file layer (web UI persistence)
+      MXL_DOMAIN_SCAN_PATH: /dev/shm # domain discovery root (§7.6)
       MXL_DECKLINK_CARD_ID: "0xa1b2c3d4"
       MXL_DECKLINK_CARD_PROFILE: "two-half-duplex"
       MXL_DOMAIN_PATH: /dev/shm/mxl

@@ -270,7 +270,83 @@ rc=$?
 [[ $rc == 0 ]] || fail "format-change run: expected exit 0 on SIGTERM, got $rc"
 PID=""
 
-rm -f "$LOG" "$LOG2" "$LOG3"
+# ---------------------------------------------------------------------------
+say "test 6: web interface — config API, live channel apply, domain browser (§7.5/§7.6)"
+rm -rf "$DOMAIN"
+SCANROOT=$(mktemp -d /dev/shm/mxl-smoke.XXXXXX)
+DOMAIN="$SCANROOT" # cleanup trap removes the scan root
+WEBDOMAIN="$SCANROOT/main"
+mkdir -p "$WEBDOMAIN"
+printf '{"urn:x-mxl:option:history_duration/v1.0": 100000000}' > "$WEBDOMAIN/options.json"
+CONFDIR=$(mktemp -d /tmp/mxl-smoke-conf.XXXXXX)
+WEB_PORT=$(( HEALTH_PORT + 1000 ))
+LOG4="/tmp/mxl-smoke-web-$$.log"
+web_env() {
+    exec env -i \
+        PATH="$PATH" LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" \
+        MXL_DECKLINK_BACKEND=mock MXL_DECKLINK_CARD_ID=0xa1b2c3d4 \
+        MXL_DOMAIN_PATH="$WEBDOMAIN" MXL_DOMAIN_SCAN_PATH="$SCANROOT" \
+        MXL_CONFIG_FILE="$CONFDIR/config.json" \
+        HEALTH_PORT="$HEALTH_PORT" METRICS_PORT="$METRICS_PORT" WEB_PORT="$WEB_PORT" \
+        CH0_DIRECTION=input CH0_SUBDEVICE_INDEX=0 CH0_VIDEO_MODE=HD720p50 \
+        CH0_AUDIO_CHANNEL_COUNT=2 \
+        CH0_MXL_VIDEO_FLOW_ID=5fbec3b1-1b0f-417d-9059-8b94a47197ed \
+        CH0_MXL_AUDIO_FLOW_ID=b3bb5be7-9fe9-4324-a5bb-4c70e1084449 \
+        CH0_LABEL=smoke-web-in \
+        "$BIN"
+}
+web_env >"$LOG4" 2>&1 &
+PID=$!
+wait_for_readyz 30 || fail "web run: /readyz did not reach 200"
+
+webapi() { curl -s --max-time 5 "http://127.0.0.1:$WEB_PORT$1"; }
+
+# UI page and status endpoint.
+webapi / | grep -q "mxl-decklink" || fail "web UI index page not served"
+state=$(webapi /api/status | python3 -c "import json,sys; print(json.load(sys.stdin)['channels'][0]['state'])") || state=err
+[[ "$state" == "healthy" ]] || fail "web /api/status channel state: $state"
+
+# Card status includes the detected input mode from the mock.
+detected=$(webapi /api/card | python3 -c "import json,sys; print(json.load(sys.stdin)['subdevices'][0]['status']['detected_input_mode'])") || detected=err
+[[ "$detected" == "HD720p50" ]] || fail "web /api/card detected input mode: $detected"
+
+# Domain scan sees the current domain; flow browser lists CH0's flows.
+webapi /api/domains | python3 -c "
+import json,sys
+d = json.load(sys.stdin)
+assert any(x['current'] and x['flow_count'] >= 2 for x in d['domains']), d
+" || fail "web /api/domains did not report the current domain with flows"
+webapi "/api/flows" | grep -q "video/v210" || fail "web /api/flows missing the video flow"
+
+# Domain creation round-trip.
+curl -s --max-time 5 -X POST "http://127.0.0.1:$WEB_PORT/api/domains" \
+    -d "{\"path\":\"$SCANROOT/created\",\"label\":\"smoke\",\"history_ms\":120}" | grep -q '"ok":true' || fail "domain creation failed"
+[[ -f "$SCANROOT/created/domain_def.json" && -f "$SCANROOT/created/options.json" ]] || fail "created domain missing marker files"
+
+# Live channel apply: add an output channel (loopback), env keys immutable.
+curl -s --max-time 5 -X PUT "http://127.0.0.1:$WEB_PORT/api/config" -d '{
+    "set": {"CH1_DIRECTION":"output","CH1_SUBDEVICE_INDEX":"0","CH1_VIDEO_MODE":"HD720p50",
+            "CH1_AUDIO_CHANNEL_COUNT":"2","CH1_MXL_VIDEO_FLOW_ID":"5fbec3b1-1b0f-417d-9059-8b94a47197ed",
+            "CH1_MXL_AUDIO_FLOW_ID":"b3bb5be7-9fe9-4324-a5bb-4c70e1084449","CH1_LABEL":"smoke-web-out"}}' \
+    | grep -q '"channels_added":\[1\]' || fail "live channel add via /api/config failed"
+sleep 3
+out_state=$(webapi /api/status | python3 -c "
+import json,sys
+chans = {c['index']: c for c in json.load(sys.stdin)['channels']}
+print(chans.get(1, {}).get('state', 'missing'))") || out_state=err
+[[ "$out_state" == "healthy" ]] || fail "dynamically added output channel state: $out_state"
+grep -q '"CH1_DIRECTION": "output"' "$CONFDIR/config.json" || fail "config file was not persisted"
+
+curl -s --max-time 5 -X PUT "http://127.0.0.1:$WEB_PORT/api/config" -d '{"set":{"CH0_DIRECTION":"output"}}' \
+    | grep -q "environment variable" || fail "env-supplied key was not rejected as immutable"
+
+kill -TERM "$PID" 2>/dev/null
+wait "$PID" 2>/dev/null
+rc=$?
+[[ $rc == 0 ]] || fail "web run: expected exit 0 on SIGTERM, got $rc"
+PID=""
+rm -rf "$CONFDIR"
+rm -f "$LOG" "$LOG2" "$LOG3" "$LOG4"
 
 # ---------------------------------------------------------------------------
 if (( FAILURES > 0 )); then

@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <functional>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -17,8 +18,18 @@ namespace mxldl::ops
         std::string body;
     };
 
-    /// Handler receives the request path (no query parsing needed here).
-    using HttpHandler = std::function<HttpResponse(std::string const& path)>;
+    struct HttpRequest
+    {
+        std::string method; // GET/HEAD/POST/PUT
+        std::string path; // without query string
+        std::string query; // raw query string (no leading '?')
+        std::string body;
+
+        /// Returns the (percent-decoded) value of one query parameter.
+        [[nodiscard]] std::optional<std::string> queryParam(std::string const& name) const;
+    };
+
+    using HttpHandler = std::function<HttpResponse(HttpRequest const&)>;
 
     class HttpServer
     {

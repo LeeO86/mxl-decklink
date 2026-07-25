@@ -11,11 +11,13 @@
 
 #include "channel/channel_manager.hpp"
 #include "config/config.hpp"
+#include "config/store.hpp"
 #include "decklink/devicemanager.hpp"
 #include "mxlbridge/domain.hpp"
 #include "ops/health.hpp"
 #include "ops/housekeeping.hpp"
 #include "ops/metrics.hpp"
+#include "ops/webapi.hpp"
 #include "util/logging.hpp"
 #include "version.hpp"
 
@@ -72,11 +74,14 @@ int main()
 {
     auto const env = mxldl::config::systemEnv();
 
-    // §3.10 step 1: ENV validation → EX_CONFIG on any violation.
+    // §3.10 step 1: configuration validation → EX_CONFIG on any violation.
+    // §4.5: the store layers env over the MXL_CONFIG_FILE file layer.
+    std::unique_ptr<mxldl::config::ConfigStore> store;
     mxldl::config::Config cfg;
     try
     {
-        cfg = mxldl::config::loadConfig(env);
+        store = std::make_unique<mxldl::config::ConfigStore>(env);
+        cfg = store->effectiveConfig();
     }
     catch (mxldl::config::ConfigError const& e)
     {
@@ -161,7 +166,28 @@ int main()
         housekeeping.start();
         channels.startAll();
 
-        mxldl::log::info("running", {{"health_port", cfg.healthPort}, {"metrics_port", cfg.metricsPort}});
+        // §7.5: web control interface.
+        std::unique_ptr<mxldl::ops::WebService> web;
+        if (cfg.webEnable)
+        {
+            web = std::make_unique<mxldl::ops::WebService>(cfg, *store, channels, *card, *domain);
+            try
+            {
+                web->start();
+            }
+            catch (std::exception const& e)
+            {
+                mxldl::log::error("web_server_failed", {{"details", e.what()}});
+                return kExitTempFail;
+            }
+        }
+
+        mxldl::log::info("running",
+            {
+                {"health_port", cfg.healthPort},
+                {"metrics_port", cfg.metricsPort},
+                {"web_port", cfg.webEnable ? std::to_string(cfg.webPort) : "disabled"},
+            });
 
         // Main wait loop.
         while (g_signalReceived.load() == 0 && !g_externalProfileChange.load())
@@ -198,6 +224,10 @@ int main()
 
         channels.stopAll(); // steps 1–4: stop streams, flush, disable, release writers/readers
         mxldl::log::debug("shutdown_stage", {{"stage", "channels_stopped"}});
+        if (web)
+        {
+            web->stop();
+        }
         housekeeping.stop();
         health.stop();
         mxldl::log::debug("shutdown_stage", {{"stage", "ops_stopped"}});

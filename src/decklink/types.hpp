@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -82,5 +83,22 @@ namespace mxldl::dl
         bool supportsCapture = false;
         bool supportsPlayback = false;
         bool hasProfileManager = false;
+    };
+
+    /// Live per-sub-device status from the DeckLink SDK (§7.5 Card tab).
+    struct SubDeviceStatus
+    {
+        std::optional<std::string> detectedInputMode; // bmdDeckLinkStatusDetectedVideoInputMode
+        std::optional<std::string> currentInputMode;
+        std::optional<std::string> currentOutputMode;
+        std::optional<std::string> currentInputPixelFormat;
+        std::optional<std::string> lastOutputPixelFormat;
+        bool inputSignalLocked = false;
+        bool referenceLocked = false;
+        bool captureBusy = false;
+        bool playbackBusy = false;
+        std::optional<std::int64_t> pcieLinkWidth;
+        std::optional<std::int64_t> pcieLinkSpeed; // generation
+        std::optional<double> temperatureC;
     };
 }

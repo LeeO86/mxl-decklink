@@ -72,5 +72,5 @@ RUN useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin mxl \
     && usermod -aG video mxl
 USER 10001:10001
 
-EXPOSE 9080 9090
+EXPOSE 8080 9080 9090
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

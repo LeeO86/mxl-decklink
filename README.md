@@ -29,9 +29,20 @@ MXL v1.0.1 API rather than the spec's paraphrase of it).
 - **Ops**: `/livez`, `/readyz`, `/statusz` on `HEALTH_PORT` (default 9080),
   Prometheus `/metrics` on `METRICS_PORT` (default 9090), structured JSON
   logging.
-- **Config**: environment variables only — global `MXL_*`/ops variables plus
-  indexed `CHx_*` per-channel blocks; fully backward compatible with the
-  v1.0 single-channel variable set. Invalid config exits 78 (`EX_CONFIG`).
+- **Web control interface** (spec §7.5): embedded single-file UI + REST API on
+  `WEB_PORT` (default 8080) — dashboard, per-channel configuration forms that
+  adapt to the matched card's sub-devices, live DeckLink SDK status (detected
+  input format, locks, PCIe, temperature), an MXL domain/flow browser with
+  flow→output assignment, and domain creation. Per-channel changes apply at
+  runtime (only the affected channel restarts); global changes are flagged
+  `restart_required`. Unauthenticated by design — keep it on protected
+  networks or set `WEB_ENABLE=false`.
+- **Config**: environment variables, optionally layered over a JSON
+  configuration file (`MXL_CONFIG_FILE`, spec §4.5) that the web interface
+  persists to. Precedence: env > file > default; env-set keys are shown
+  read-only in the UI. Indexed `CHx_*` per-channel blocks; fully backward
+  compatible with the v1.0 single-channel variable set. Invalid config exits
+  78 (`EX_CONFIG`).
 
 ## Building
 
@@ -113,6 +124,13 @@ The full variable reference is SPECIFICATION.md §4 (global) and §4.2
 [`docker/docker-compose.yaml`](docker/docker-compose.yaml),
 [`deploy/mxl-decklink.yaml`](deploy/mxl-decklink.yaml) and
 [`deploy/generic-device-plugin.yaml`](deploy/generic-device-plugin.yaml).
+
+Then open the web interface at `http://<host>:8080/` for interactive setup:
+mount a config volume and set `MXL_CONFIG_FILE=/config/mxl-decklink.json` so
+changes persist. The Settings tab renders the effective configuration as a
+copyable `KEY=value` block if you prefer to freeze a web-configured setup
+back into environment variables (which then override the file and become
+read-only in the UI).
 
 ### Exit codes
 

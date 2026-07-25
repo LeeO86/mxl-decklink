@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<!-- mxl-decklink web control interface (SPECIFICATION.md §7.5).
+     Single-file vanilla JS SPA embedded into the binary; talks to /api/. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mxl-decklink</title>
+<style>
+:root{
+  --bg:#0f1419;--panel:#161d26;--panel2:#1d2733;--border:#2a3644;
+  --text:#d7e0ea;--muted:#8496a8;--accent:#4da3ff;--ok:#3fb968;--warn:#e0a83a;
+  --bad:#e05a4e;--chip:#233041;font-size:15px;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
+header{display:flex;align-items:center;gap:1rem;padding:.7rem 1.2rem;background:var(--panel);border-bottom:1px solid var(--border)}
+header h1{font-size:1.05rem;margin:0;font-weight:600}
+header .card-name{color:var(--muted);font-size:.85rem}
+#restart-banner{display:none;background:var(--warn);color:#20180a;padding:.45rem 1.2rem;font-size:.85rem;font-weight:600}
+nav{display:flex;gap:.25rem;padding:.4rem 1.2rem 0;background:var(--panel);border-bottom:1px solid var(--border)}
+nav button{background:none;border:none;border-bottom:2px solid transparent;color:var(--muted);padding:.5rem .9rem;cursor:pointer;font-size:.9rem}
+nav button.active{color:var(--text);border-bottom-color:var(--accent)}
+main{padding:1.2rem;max-width:1180px;margin:0 auto}
+.grid{display:grid;gap:.9rem}
+.cards{grid-template-columns:repeat(auto-fill,minmax(240px,1fr))}
+.panel{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:.9rem 1rem}
+.panel h3{margin:.1rem 0 .6rem;font-size:.85rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+table{width:100%;border-collapse:collapse;font-size:.85rem}
+th{color:var(--muted);text-align:left;font-weight:500;padding:.35rem .5rem;border-bottom:1px solid var(--border)}
+td{padding:.35rem .5rem;border-bottom:1px solid var(--panel2)}
+.pill{display:inline-block;padding:.1rem .55rem;border-radius:99px;font-size:.75rem;font-weight:600}
+.pill.healthy{background:rgba(63,185,104,.15);color:var(--ok)}
+.pill.degraded{background:rgba(224,168,58,.15);color:var(--warn)}
+.pill.failed,.pill.init{background:rgba(224,90,78,.15);color:var(--bad)}
+.pill.init{color:var(--muted)}
+.pill.on{background:rgba(63,185,104,.15);color:var(--ok)}
+.pill.off{background:rgba(224,90,78,.15);color:var(--bad)}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:.15rem .8rem;font-size:.85rem}
+.kv dt{color:var(--muted)}.kv dd{margin:0;font-variant-numeric:tabular-nums}
+label{display:block;font-size:.75rem;color:var(--muted);margin:.5rem 0 .15rem}
+input,select,textarea{width:100%;background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:5px;padding:.4rem .5rem;font-size:.85rem;font-family:inherit}
+input:disabled,select:disabled{opacity:.55;cursor:not-allowed}
+textarea{font-family:ui-monospace,monospace;min-height:180px}
+button.btn{background:var(--accent);color:#08243f;border:none;border-radius:5px;padding:.45rem .9rem;font-size:.85rem;font-weight:600;cursor:pointer}
+button.btn.secondary{background:var(--chip);color:var(--text)}
+button.btn.danger{background:var(--bad);color:#fff}
+button.btn:disabled{opacity:.5;cursor:not-allowed}
+.envbadge{display:inline-block;background:var(--chip);color:var(--warn);border-radius:4px;font-size:.65rem;padding:.05rem .35rem;margin-left:.35rem;vertical-align:middle}
+.filebadge{color:var(--accent)}
+.row{display:flex;gap:.7rem;flex-wrap:wrap}.row>*{flex:1;min-width:150px}
+.actions{display:flex;gap:.6rem;margin-top:.8rem;justify-content:flex-end}
+.msg{font-size:.8rem;margin-top:.5rem;white-space:pre-wrap}
+.msg.err{color:var(--bad)}.msg.ok{color:var(--ok)}
+.muted{color:var(--muted)}
+.flowsel{background:var(--panel2);border:1px solid var(--border);border-radius:6px;padding:.6rem;margin-top:.5rem}
+h2{font-size:1rem;margin:1.4rem 0 .7rem}
+dialog{background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:8px;max-width:430px;width:90%}
+dialog::backdrop{background:rgba(0,0,0,.55)}
+code{background:var(--chip);padding:.05rem .3rem;border-radius:4px;font-size:.8rem}
+.copybtn{float:right}
+</style>
+</head>
+<body>
+<header>
+  <h1>mxl-decklink</h1>
+  <span class="card-name" id="hdr-card"></span>
+  <span style="flex:1"></span>
+  <span class="muted" id="hdr-version" style="font-size:.75rem"></span>
+</header>
+<div id="restart-banner">Global configuration changed — restart the container to apply.</div>
+<nav id="tabs">
+  <button data-tab="dashboard" class="active">Dashboard</button>
+  <button data-tab="channels">Channels</button>
+  <button data-tab="card">Card</button>
+  <button data-tab="mxl">MXL</button>
+  <button data-tab="settings">Settings</button>
+</nav>
+<main id="content"></main>
+
+<dialog id="assign-dialog">
+  <form method="dialog" id="assign-form" style="padding:1rem">
+    <h3 style="margin-top:0">Assign flow to output</h3>
+    <div id="assign-info" class="muted" style="font-size:.8rem"></div>
+    <label>Output channel</label>
+    <select id="assign-channel"></select>
+    <label>Audio flow (optional)</label>
+    <select id="assign-audio"></select>
+    <div id="assign-mode-hint" class="msg"></div>
+    <div class="actions">
+      <button class="btn secondary" value="cancel">Cancel</button>
+      <button class="btn" id="assign-ok" value="ok">Assign</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+const el = (tag, attrs = {}, ...children) => {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") n.className = v;
+    else if (k.startsWith("on")) n.addEventListener(k.slice(2), v);
+    else if (v !== null && v !== undefined) n.setAttribute(k, v);
+  }
+  for (const c of children.flat()) {
+    if (c === null || c === undefined) continue;
+    n.append(c.nodeType ? c : document.createTextNode(c));
+  }
+  return n;
+};
+const api = {
+  get: p => fetch(p).then(r => r.json()),
+  put: (p, body) => fetch(p, {method: "PUT", body: JSON.stringify(body)}).then(r => r.json()),
+  post: (p, body) => fetch(p, {method: "POST", body: JSON.stringify(body)}).then(r => r.json()),
+};
+let currentTab = "dashboard";
+let refreshTimer = null;
+let configCache = null; // /api/config
+let statusCache = null;
+
+/* ---------- helpers ---------- */
+const pill = (text, cls) => el("span", {class: `pill ${cls}`}, text);
+const statePill = s => pill(s, s);
+const boolPill = (v, on = "yes", off = "no") => pill(v ? on : off, v ? "on" : "off");
+const fmtRate = (n, d) => (n === null || n === undefined) ? "" : (d && d !== 1 ? (n / d).toFixed(2) : n) + " fps";
+const chKey = (idx, suffix) => `CH${idx}_${suffix}`;
+
+function channelIndices(cfg) {
+  const idx = new Set();
+  for (const key of Object.keys(cfg.values)) {
+    const m = key.match(/^CH(\d+)_DIRECTION$/);
+    if (m) idx.add(Number(m[1]));
+  }
+  return [...idx].sort((a, b) => a - b);
+}
+function valueOf(cfg, key) { const v = cfg.values[key]; return v ? v.value : null; }
+function sourceOf(cfg, key) { const v = cfg.values[key]; return v ? v.source : "default"; }
+function channelMeta(cfg, suffix) { return cfg.schema.find(m => m.kind === "channel" && m.key === suffix); }
+
+// Derive the §3.2.1 mode name from flow geometry for auto-assignment.
+function modeNameForFlow(f, options) {
+  if (!f.width || !f.rate_numerator) return null;
+  const fps = f.rate_denominator && f.rate_denominator !== 1
+    ? {24000: "2398", 30000: "2997", 60000: "5994"}[f.rate_numerator] : String(f.rate_numerator);
+  if (!fps) return null;
+  let name = null;
+  if (f.height === 720) name = `HD720p${fps}`;
+  else if (f.height === 1080) name = f.interlaced ? `HD1080i${fps}` : `HD1080p${fps}`;
+  else if (f.height === 2160) name = `4K2160p${fps}`;
+  else if (f.height === 4320) name = `8K4320p${fps}`;
+  return options.includes(name) ? name : null;
+}
+
+/* ---------- tabs ---------- */
+document.getElementById("tabs").addEventListener("click", e => {
+  if (e.target.dataset.tab) switchTab(e.target.dataset.tab);
+});
+function switchTab(tab) {
+  currentTab = tab;
+  document.querySelectorAll("nav button").forEach(b => b.classList.toggle("active", b.dataset.tab === tab));
+  render();
+}
+function scheduleRefresh(ms) {
+  clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(render, ms);
+}
+
+async function render() {
+  clearTimeout(refreshTimer);
+  try {
+    if (currentTab === "dashboard") await renderDashboard();
+    else if (currentTab === "channels") await renderChannels();
+    else if (currentTab === "card") await renderCard();
+    else if (currentTab === "mxl") await renderMxl();
+    else if (currentTab === "settings") await renderSettings();
+  } catch (err) {
+    $("#content").replaceChildren(el("div", {class: "panel"}, `API error: ${err}`));
+    scheduleRefresh(3000);
+  }
+}
+
+async function updateHeader() {
+  const s = statusCache;
+  if (!s) return;
+  $("#hdr-card").textContent = `${s.card.name} (${s.card.persistent_id}) — ${s.backend} backend`;
+  $("#hdr-version").textContent = `v${s.version} · MXL ${s.mxl_version}` + (s.decklink_api_version ? ` · DeckLink API ${s.decklink_api_version}` : "");
+  $("#restart-banner").style.display = s.restart_required ? "block" : "none";
+}
+
+/* ---------- dashboard ---------- */
+async function renderDashboard() {
+  statusCache = await api.get("/api/status");
+  await updateHeader();
+  const s = statusCache;
+  const info = el("div", {class: "grid cards"},
+    el("div", {class: "panel"}, el("h3", {}, "Process"),
+      el("dl", {class: "kv"},
+        el("dt", {}, "Version"), el("dd", {}, s.version),
+        el("dt", {}, "MXL"), el("dd", {}, s.mxl_version),
+        el("dt", {}, "DeckLink API"), el("dd", {}, s.decklink_api_version || "n/a"),
+        el("dt", {}, "Uptime"), el("dd", {}, `${Math.floor(s.uptime_s / 3600)}h ${Math.floor(s.uptime_s / 60) % 60}m ${s.uptime_s % 60}s`))),
+    el("div", {class: "panel"}, el("h3", {}, "Card"),
+      el("dl", {class: "kv"},
+        el("dt", {}, "Name"), el("dd", {}, s.card.name),
+        el("dt", {}, "Persistent ID"), el("dd", {}, s.card.persistent_id),
+        el("dt", {}, "Sub-devices"), el("dd", {}, s.card.subdevices),
+        el("dt", {}, "Backend"), el("dd", {}, s.backend))),
+    el("div", {class: "panel"}, el("h3", {}, "MXL domain"),
+      el("dl", {class: "kv"},
+        el("dt", {}, "Path"), el("dd", {}, s.domain.path),
+        el("dt", {}, "tmpfs"), el("dd", {}, boolPill(s.domain.tmpfs)))));
+  const rows = s.channels.map(c => el("tr", {},
+    el("td", {}, c.index), el("td", {}, c.label), el("td", {}, c.direction),
+    el("td", {}, c.subdevice_index), el("td", {}, statePill(c.state)),
+    el("td", {}, c.active_video_mode || c.video_mode_setting),
+    el("td", {}, boolPill(c.signal_locked, "locked", "no signal")),
+    el("td", {}, c.frames_total), el("td", {}, c.frames_dropped),
+    el("td", {}, c.grains_committed), el("td", {}, c.reconnects),
+    el("td", {}, el("code", {}, c.active_video_flow_id.slice(0, 8) + "…"))));
+  const table = el("div", {class: "panel", style: "margin-top:.9rem"}, el("h3", {}, "Channels"),
+    el("table", {}, el("thead", {}, el("tr", {},
+      ...["#", "Label", "Dir", "Sub", "State", "Mode", "Signal", "Frames", "Drops", "Grains", "Reconn", "Flow"].map(h => el("th", {}, h)))),
+      el("tbody", {}, rows.length ? rows : el("tr", {}, el("td", {colspan: 12, class: "muted"}, "no channels configured")))));
+  $("#content").replaceChildren(info, table);
+  scheduleRefresh(2000);
+}
+
+/* ---------- channels ---------- */
+const CH_FIELD_ORDER = ["DIRECTION", "SUBDEVICE_INDEX", "VIDEO_MODE", "PIXEL_FORMAT", "MXL_VIDEO_FLOW_ID", "MXL_AUDIO_FLOW_ID",
+  "AUDIO_ENABLE", "AUDIO_CHANNEL_COUNT", "AUDIO_SAMPLE_TYPE", "VIDEO_ANC_ENABLE", "MXL_ANC_FLOW_ID", "LABEL",
+  "MXL_VIDEO_FLOW_LABEL", "MXL_AUDIO_FLOW_LABEL", "MXL_GROUP_HINT", "MXL_DEVICE_ID", "MXL_SOURCE_ID",
+  "ALLOW_FORMAT_CONVERSION", "GRAIN_COUNT", "AUDIO_BUFFER_MS", "COMMIT_BATCH_HINT", "OUTPUT_PREROLL_GRAINS", "READER_TIMEOUT_MS"];
+
+function fieldInput(cfg, idx, meta) {
+  const key = chKey(idx, meta.key);
+  const value = valueOf(cfg, key) ?? "";
+  const src = sourceOf(cfg, key);
+  const fromEnv = src === "env";
+  const disabled = fromEnv || !cfg.file;
+  let input;
+  if (meta.type === "enum") {
+    input = el("select", {id: `f-${key}`, disabled});
+    if (!["DIRECTION", "SUBDEVICE_INDEX"].includes(meta.key)) input.append(el("option", {value: ""}, meta.default ? `(default: ${meta.default})` : "(unset)"));
+    for (const o of meta.options) input.append(el("option", {value: o, selected: o === value ? "" : null}, o));
+  } else if (meta.type === "bool") {
+    input = el("select", {id: `f-${key}`, disabled},
+      el("option", {value: ""}, `(default: ${meta.default})`),
+      el("option", {value: "true", selected: value === "true" ? "" : null}, "true"),
+      el("option", {value: "false", selected: value === "false" ? "" : null}, "false"));
+  } else if (meta.key === "SUBDEVICE_INDEX") {
+    input = el("select", {id: `f-${key}`, disabled});
+    for (let i = 0; i < (cfg.card_subdevices || 8); i++) input.append(el("option", {value: String(i), selected: String(i) === value ? "" : null}, `sub-device ${i}`));
+  } else {
+    input = el("input", {id: `f-${key}`, value, placeholder: meta.default || "", disabled: disabled ? "" : null});
+  }
+  const badge = fromEnv ? el("span", {class: "envbadge", title: "Set via environment variable — unset it to edit here"}, "ENV")
+    : (src === "file" ? el("span", {class: "envbadge filebadge", title: "From the configuration file"}, "FILE") : null);
+  return el("div", {}, el("label", {title: meta.help}, meta.key, badge), input);
+}
+
+async function renderChannels() {
+  configCache = await api.get("/api/config");
+  const cfg = configCache;
+  const indices = channelIndices(cfg);
+  const container = el("div", {});
+  if (!cfg.file) {
+    container.append(el("div", {class: "panel", style: "margin-bottom:.9rem"},
+      "No configuration file is mounted (MXL_CONFIG_FILE is unset) — settings are read-only. ",
+      "Mount a config volume and set MXL_CONFIG_FILE to enable editing."));
+  }
+  for (const idx of indices) {
+    container.append(channelPanel(cfg, idx, false));
+  }
+  const freeIdx = [...Array(16).keys()].find(i => !indices.includes(i));
+  const addBtn = el("button", {class: "btn", disabled: (!cfg.file || freeIdx === undefined) ? "" : null,
+    onclick: () => { container.insertBefore(channelPanel(cfg, freeIdx, true), addBtn); addBtn.disabled = true; }},
+    "+ Add channel");
+  container.append(addBtn);
+  $("#content").replaceChildren(container);
+}
+
+function channelPanel(cfg, idx, isNew) {
+  const fields = CH_FIELD_ORDER.map(suffix => fieldInput(cfg, idx, channelMeta(cfg, suffix)));
+  const msg = el("div", {class: "msg"});
+  const save = async () => {
+    const set = {}, unset = [];
+    for (const suffix of CH_FIELD_ORDER) {
+      const key = chKey(idx, suffix);
+      if (sourceOf(cfg, key) === "env") continue;
+      const input = document.getElementById(`f-${key}`);
+      if (!input || input.disabled) continue;
+      const v = input.value.trim();
+      if (v === "") { if (sourceOf(cfg, key) === "file") unset.push(key); }
+      else set[key] = v;
+    }
+    const res = await api.put("/api/config", {set, unset});
+    if (res.error) { msg.className = "msg err"; msg.textContent = res.error; }
+    else {
+      msg.className = "msg ok";
+      msg.textContent = `Saved.${res.channels_restarted.length ? " Restarted: " + res.channels_restarted.join(", ") + "." : ""}${res.restart_required ? " Container restart required for global changes." : ""}`;
+      setTimeout(renderChannels, 900);
+    }
+  };
+  const remove = async () => {
+    if (!confirm(`Remove channel ${idx}?`)) return;
+    const unset = CH_FIELD_ORDER.map(sfx => chKey(idx, sfx)).filter(k => sourceOf(cfg, k) === "file");
+    const res = await api.put("/api/config", {set: {}, unset});
+    if (res.error) { msg.className = "msg err"; msg.textContent = res.error; }
+    else setTimeout(renderChannels, 500);
+  };
+  const anyEnv = CH_FIELD_ORDER.some(sfx => sourceOf(cfg, chKey(idx, sfx)) === "env");
+  return el("div", {class: "panel", style: "margin-bottom:.9rem"},
+    el("h3", {}, `Channel ${idx}` + (isNew ? " (new)" : "") + ` — ${valueOf(cfg, chKey(idx, "LABEL")) || "ch" + idx}`),
+    anyEnv ? el("div", {class: "muted", style: "font-size:.75rem;margin-bottom:.4rem"},
+      "Some settings are fixed by environment variables and cannot be changed here.") : null,
+    el("div", {class: "grid", style: "grid-template-columns:repeat(auto-fill,minmax(215px,1fr))"}, fields),
+    el("div", {class: "actions"},
+      isNew ? null : el("button", {class: "btn danger", disabled: (!cfg.file || anyEnv) ? "" : null, onclick: remove}, "Remove"),
+      el("button", {class: "btn", disabled: !cfg.file ? "" : null, onclick: save}, isNew ? "Create" : "Save & apply")),
+    msg);
+}
+
+/* ---------- card ---------- */
+async function renderCard() {
+  const c = await api.get("/api/card");
+  const panels = c.subdevices.map(sd => el("div", {class: "panel"},
+    el("h3", {}, `Sub-device ${sd.index} — ${sd.display_name}`),
+    el("dl", {class: "kv"},
+      el("dt", {}, "Model"), el("dd", {}, sd.model),
+      el("dt", {}, "Capture / Playback"), el("dd", {}, `${sd.supports_capture ? "✓" : "—"} / ${sd.supports_playback ? "✓" : "—"}`),
+      el("dt", {}, "Format detection"), el("dd", {}, boolPill(sd.supports_format_detection)),
+      el("dt", {}, "Detected input"), el("dd", {}, sd.status.detected_input_mode || "—"),
+      el("dt", {}, "Current input"), el("dd", {}, sd.status.current_input_mode || "—"),
+      el("dt", {}, "Current output"), el("dd", {}, sd.status.current_output_mode || "—"),
+      el("dt", {}, "Input pixel format"), el("dd", {}, sd.status.current_input_pixel_format || "—"),
+      el("dt", {}, "Signal lock"), el("dd", {}, boolPill(sd.status.input_signal_locked, "locked", "unlocked")),
+      el("dt", {}, "Reference lock"), el("dd", {}, boolPill(sd.status.reference_locked, "locked", "unlocked")),
+      el("dt", {}, "Busy"), el("dd", {}, `capture: ${sd.status.capture_busy ? "yes" : "no"}, playback: ${sd.status.playback_busy ? "yes" : "no"}`),
+      el("dt", {}, "PCIe"), el("dd", {}, sd.status.pcie_link_width ? `x${sd.status.pcie_link_width} gen${sd.status.pcie_link_speed ?? "?"}` : "—"),
+      el("dt", {}, "Temperature"), el("dd", {}, sd.status.temperature_c ? `${sd.status.temperature_c} °C` : "—"))));
+  $("#content").replaceChildren(
+    el("div", {class: "panel", style: "margin-bottom:.9rem"}, el("h3", {}, "Card"),
+      el("dl", {class: "kv"}, el("dt", {}, "Name"), el("dd", {}, c.name), el("dt", {}, "Persistent ID"), el("dd", {}, c.persistent_id))),
+    el("div", {class: "grid cards"}, panels));
+  scheduleRefresh(2000);
+}
+
+/* ---------- MXL ---------- */
+let selectedDomain = null;
+async function renderMxl() {
+  const [doms, cfg] = await Promise.all([api.get("/api/domains"), api.get("/api/config")]);
+  configCache = cfg;
+  if (!selectedDomain) selectedDomain = (doms.domains.find(d => d.current) || doms.domains[0])?.path;
+
+  const domRows = doms.domains.map(d => el("tr", {style: d.path === selectedDomain ? "background:var(--panel2)" : "", onclick: () => { selectedDomain = d.path; renderMxl(); }},
+    el("td", {}, d.current ? "▶ " : "", d.label || d.path.split("/").pop()),
+    el("td", {}, el("code", {}, d.path)),
+    el("td", {}, d.flow_count), el("td", {}, boolPill(d.tmpfs)),
+    el("td", {}, d.history_duration_ns ? `${d.history_duration_ns / 1e6} ms` : "default"),
+    el("td", {class: "muted"}, d.description || "")));
+
+  const createMsg = el("div", {class: "msg"});
+  const pathIn = el("input", {placeholder: `${doms.scan_path}/my-domain`});
+  const labelIn = el("input", {placeholder: "label"});
+  const descIn = el("input", {placeholder: "description (optional)"});
+  const histIn = el("input", {placeholder: "history ms (optional, default 200)", type: "number"});
+  const createBtn = el("button", {class: "btn", onclick: async () => {
+    const body = {path: pathIn.value.trim(), label: labelIn.value.trim(), description: descIn.value.trim()};
+    if (histIn.value) body.history_ms = Number(histIn.value);
+    const res = await api.post("/api/domains", body);
+    if (res.error) { createMsg.className = "msg err"; createMsg.textContent = res.error; }
+    else {
+      createMsg.className = "msg ok";
+      createMsg.textContent = `Domain created at ${res.path} (id ${res.id})` + (res.tmpfs ? "" : " — WARNING: not tmpfs-backed!");
+      selectedDomain = res.path;
+      setTimeout(renderMxl, 800);
+    }
+  }}, "Create domain");
+
+  let flowsPanel = el("div", {class: "panel"}, el("h3", {}, "Flows"), el("div", {class: "muted"}, "no domain selected"));
+  if (selectedDomain) {
+    const fl = await api.get(`/api/flows?domain=${encodeURIComponent(selectedDomain)}`);
+    const videoModeOpts = channelMeta(cfg, "VIDEO_MODE").options;
+    const rows = fl.flows.map(f => {
+      const isVideo = f.format.endsWith("video");
+      const assign = isVideo && cfg.file ? el("button", {class: "btn secondary", style: "padding:.2rem .5rem;font-size:.72rem",
+        onclick: () => openAssignDialog(f, fl.flows, videoModeOpts)}, "→ output") : null;
+      return el("tr", {},
+        el("td", {}, el("code", {title: f.id}, f.id.slice(0, 13) + "…")),
+        el("td", {}, f.media_type),
+        el("td", {}, f.label || el("span", {class: "muted"}, f.group_hint)),
+        el("td", {}, f.width ? `${f.width}×${f.height}${f.interlaced ? "i" : "p"}` : (f.channel_count ? `${f.channel_count} ch` : "")),
+        el("td", {}, f.media_type.startsWith("audio") ? "48 kHz" : fmtRate(f.rate_numerator, f.rate_denominator)),
+        el("td", {}, boolPill(f.active, "live", "idle")),
+        el("td", {}, f.head_index ?? ""),
+        el("td", {}, assign));
+    });
+    flowsPanel = el("div", {class: "panel"}, el("h3", {}, `Flows in ${selectedDomain}`),
+      el("table", {}, el("thead", {}, el("tr", {}, ...["Flow ID", "Type", "Label", "Geometry", "Rate", "State", "Head", ""].map(h => el("th", {}, h)))),
+        el("tbody", {}, rows.length ? rows : el("tr", {}, el("td", {colspan: 8, class: "muted"}, "no flows in this domain")))));
+  }
+
+  $("#content").replaceChildren(
+    el("div", {class: "panel", style: "margin-bottom:.9rem"}, el("h3", {}, `Domains under ${doms.scan_path}`),
+      el("table", {}, el("thead", {}, el("tr", {}, ...["Label", "Path", "Flows", "tmpfs", "History", "Description"].map(h => el("th", {}, h)))),
+        el("tbody", {}, domRows.length ? domRows : el("tr", {}, el("td", {colspan: 6, class: "muted"}, "no domains found"))))),
+    flowsPanel,
+    el("div", {class: "panel", style: "margin-top:.9rem"}, el("h3", {}, "Create new domain"),
+      el("div", {class: "row"},
+        el("div", {}, el("label", {}, "Path"), pathIn),
+        el("div", {}, el("label", {}, "Label"), labelIn),
+        el("div", {}, el("label", {}, "Description"), descIn),
+        el("div", {}, el("label", {}, "History duration"), histIn)),
+      el("div", {class: "actions"}, createBtn), createMsg));
+  scheduleRefresh(5000);
+}
+
+function openAssignDialog(flow, allFlows, videoModeOpts) {
+  const cfg = configCache;
+  const dlg = $("#assign-dialog");
+  const chSel = $("#assign-channel");
+  const auSel = $("#assign-audio");
+  chSel.replaceChildren();
+  const outputs = channelIndices(cfg).filter(i => valueOf(cfg, chKey(i, "DIRECTION")) === "output");
+  for (const i of outputs) chSel.append(el("option", {value: String(i)}, `channel ${i} (${valueOf(cfg, chKey(i, "LABEL")) || "ch" + i})`));
+  const freeIdx = [...Array(16).keys()].find(i => !channelIndices(cfg).includes(i));
+  if (freeIdx !== undefined) chSel.append(el("option", {value: `new:${freeIdx}`}, `new output channel ${freeIdx}`));
+  auSel.replaceChildren(el("option", {value: ""}, "(none / keep current)"));
+  for (const f of allFlows.filter(f => f.media_type.startsWith("audio")))
+    auSel.append(el("option", {value: f.id}, `${f.label || f.id.slice(0, 13)} (${f.channel_count} ch)`));
+  const mode = modeNameForFlow(flow, videoModeOpts);
+  $("#assign-info").textContent = `Video flow ${flow.id} — ${flow.width}×${flow.height}${flow.interlaced ? "i" : "p"} ${fmtRate(flow.rate_numerator, flow.rate_denominator)}`;
+  $("#assign-mode-hint").className = mode ? "msg ok" : "msg err";
+  $("#assign-mode-hint").textContent = mode ? `Video mode will be set to ${mode}.`
+    : "WARNING: no DeckLink video mode matches this flow's geometry — assignment will keep the channel's current mode and may fail.";
+  $("#assign-form").onsubmit = async e => {
+    if (e.submitter?.value !== "ok") return;
+    e.preventDefault();
+    let idx = chSel.value;
+    const set = {};
+    if (idx.startsWith("new:")) {
+      idx = idx.slice(4);
+      set[chKey(idx, "DIRECTION")] = "output";
+      set[chKey(idx, "SUBDEVICE_INDEX")] = "0";
+    }
+    set[chKey(idx, "MXL_VIDEO_FLOW_ID")] = flow.id;
+    if (auSel.value) set[chKey(idx, "MXL_AUDIO_FLOW_ID")] = auSel.value;
+    else if (!valueOf(cfg, chKey(idx, "MXL_AUDIO_FLOW_ID"))) set[chKey(idx, "AUDIO_ENABLE")] = "false";
+    if (mode) set[chKey(idx, "VIDEO_MODE")] = mode;
+    const res = await api.put("/api/config", {set, unset: []});
+    dlg.close();
+    if (res.error) alert(res.error);
+    else renderMxl();
+  };
+  dlg.showModal();
+}
+
+/* ---------- settings ---------- */
+async function renderSettings() {
+  configCache = await api.get("/api/config");
+  const cfg = configCache;
+  const globals = cfg.schema.filter(m => m.kind === "global");
+  const fields = globals.map(meta => {
+    const key = meta.key;
+    const value = valueOf(cfg, key) ?? "";
+    const src = sourceOf(cfg, key);
+    const fromEnv = src === "env";
+    const disabled = fromEnv || !cfg.file;
+    let input;
+    if (meta.type === "enum" || meta.type === "bool") {
+      const opts = meta.type === "bool" ? ["true", "false"] : meta.options;
+      input = el("select", {id: `g-${key}`, disabled: disabled ? "" : null},
+        el("option", {value: ""}, meta.default ? `(default: ${meta.default})` : "(unset)"),
+        ...opts.map(o => el("option", {value: o, selected: o === value ? "" : null}, o)));
+    } else {
+      input = el("input", {id: `g-${key}`, value, placeholder: meta.default || "", disabled: disabled ? "" : null});
+    }
+    const badge = fromEnv ? el("span", {class: "envbadge", title: "Set via environment variable — unset it to edit here"}, "ENV")
+      : (src === "file" ? el("span", {class: "envbadge filebadge"}, "FILE") : null);
+    return el("div", {}, el("label", {title: meta.help}, key, badge, meta.requires_restart ? el("span", {class: "envbadge", title: "Applies on next container start"}, "RESTART") : null), input);
+  });
+  const msg = el("div", {class: "msg"});
+  const save = async () => {
+    const set = {}, unset = [];
+    for (const meta of globals) {
+      if (sourceOf(cfg, meta.key) === "env") continue;
+      const input = document.getElementById(`g-${meta.key}`);
+      if (!input || input.disabled) continue;
+      const v = input.value.trim();
+      if (v === "") { if (sourceOf(cfg, meta.key) === "file") unset.push(meta.key); }
+      else set[meta.key] = v;
+    }
+    const res = await api.put("/api/config", {set, unset});
+    if (res.error) { msg.className = "msg err"; msg.textContent = res.error; }
+    else {
+      msg.className = "msg ok";
+      msg.textContent = "Saved." + (res.restart_required ? " Container restart required to apply global changes." : "");
+      statusCache = await api.get("/api/status"); updateHeader();
+    }
+  };
+  const envArea = el("textarea", {readonly: ""}, cfg.env_block);
+  $("#content").replaceChildren(
+    el("div", {class: "panel"},
+      el("h3", {}, "Configuration file"),
+      el("div", {class: "kv", style: "font-size:.85rem"},
+        el("dt", {}, "MXL_CONFIG_FILE"), el("dd", {}, cfg.file || "not set — settings are read-only")),
+    ),
+    el("div", {class: "panel", style: "margin-top:.9rem"}, el("h3", {}, "Global settings"),
+      el("div", {class: "grid", style: "grid-template-columns:repeat(auto-fill,minmax(230px,1fr))"}, fields),
+      el("div", {class: "actions"}, el("button", {class: "btn", disabled: !cfg.file ? "" : null, onclick: save}, "Save")),
+      msg),
+    el("div", {class: "panel", style: "margin-top:.9rem"},
+      el("h3", {}, "Effective configuration as environment variables",
+        el("button", {class: "btn secondary copybtn", onclick: () => navigator.clipboard.writeText(cfg.env_block)}, "Copy")),
+      el("div", {class: "muted", style: "font-size:.75rem;margin-bottom:.4rem"},
+        "Copy this block to persist the current setup as environment variables (they then override the file, §4.5)."),
+      envArea));
+}
+
+/* ---------- boot ---------- */
+(async () => {
+  try { statusCache = await api.get("/api/status"); updateHeader(); } catch (e) {}
+  render();
+})();
+</script>
+</body>
+</html>

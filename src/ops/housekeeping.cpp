@@ -51,10 +51,10 @@ namespace mxldl::ops
             for (auto const& v : _channels.channels())
             {
                 Labels labels = {
-                    {"channel_index", std::to_string(v.cfg->index)},
-                    {"channel_label", v.cfg->label},
-                    {"direction", config::directionName(v.cfg->direction)},
-                    {"flow_id", v.status->activeVideoFlowId()},
+                    {"channel_index", std::to_string(v.cfg.index)},
+                    {"channel_label", v.cfg.label},
+                    {"direction", config::directionName(v.cfg.direction)},
+                    {"flow_id", v.activeVideoFlowId},
                 };
                 _metrics.gauge("mxl_active_video_flow_id", "Active video flow UUID (info metric, value is always 1)", labels).set(1.0);
             }
