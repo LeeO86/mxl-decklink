@@ -159,9 +159,14 @@ document.getElementById("tabs").addEventListener("click", e => {
 });
 function switchTab(tab) {
   currentTab = tab;
+  location.hash = tab;
   document.querySelectorAll("nav button").forEach(b => b.classList.toggle("active", b.dataset.tab === tab));
   render();
 }
+window.addEventListener("hashchange", () => {
+  const tab = location.hash.slice(1);
+  if (tab && tab !== currentTab) switchTab(tab);
+});
 function scheduleRefresh(ms) {
   clearTimeout(refreshTimer);
   refreshTimer = setTimeout(render, ms);
@@ -522,7 +527,9 @@ async function renderSettings() {
 /* ---------- boot ---------- */
 (async () => {
   try { statusCache = await api.get("/api/status"); updateHeader(); } catch (e) {}
-  render();
+  const initial = location.hash.slice(1);
+  if (["dashboard", "channels", "card", "mxl", "settings"].includes(initial)) switchTab(initial);
+  else render();
 })();
 </script>
 </body>
