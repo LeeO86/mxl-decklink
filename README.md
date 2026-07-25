@@ -85,6 +85,16 @@ Host prerequisites (§5.4): Blackmagic Desktop Video ≥ 16.0 with the
 (default `/dev/shm/mxl`), and TAI-disciplined system time (chrony with a
 correct kernel TAI offset).
 
+Two deployment lessons from field testing (details in SPECIFICATION.md §5 and
+`docker/docker-compose.yaml`):
+
+- **Run the container as the uid/gid that owns the MXL domain directory**
+  (e.g. `user: "1000:1000"` in compose). All containers sharing a domain must
+  agree on ownership, because MXL flows are plain files in the shared tmpfs.
+- **Prefer `DECKLINK_LIB_MODE=hostmount`** (bind-mount the host's
+  `libDeckLinkAPI.so` read-only) over the bundled library: the bundled `.deb`
+  only works when it exactly matches the host driver version.
+
 Minimal single-channel example:
 
 ```bash

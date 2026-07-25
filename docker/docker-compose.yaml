@@ -5,13 +5,31 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
+    # IMPORTANT — run as the uid/gid that owns the MXL domain directory on the
+    # host. MXL flows are plain files in the shared tmpfs: every cooperating
+    # container must be able to read AND write them, so all MXL media
+    # functions on a host should agree on one uid/gid (or a shared group) for
+    # the domain. The image's built-in user is 10001; if your domain directory
+    # is owned by e.g. uid 1000 (the default first user on most distros, and
+    # what other MXL containers like the mxl-hands-on functions typically
+    # use), override it here:
+    user: "1000:1000"
     # §5.2: device nodes via --device (sets cgroup rules, unlike bind mounts).
     devices:
       - /dev/blackmagic:/dev/blackmagic
     volumes:
-      - /dev/shm/mxl:/dev/shm/mxl # host tmpfs MXL domain
-      # DECKLINK_LIB_MODE=hostmount alternative (§5.1): match host driver
-      # - /usr/lib/libDeckLinkAPI.so:/usr/lib/libDeckLinkAPI.so:ro
+      # Mount the whole host shared-memory tmpfs (not just one domain
+      # subdirectory). This matches the CBC mxl-hands-on media-function
+      # pattern and lets the container discover other domains and (with the
+      # web UI, see the feature roadmap) create new ones. MXL_DOMAIN_PATH
+      # then points at one domain directory inside this mount.
+      - /dev/shm:/dev/shm
+      # Recommended (§5.1): bind-mount the host's libDeckLinkAPI.so instead of
+      # bundling it. The bundled-package pattern only works when the .deb baked
+      # into the image EXACTLY matches the host kernel driver version —
+      # field testing showed version skew makes the bundled library fail to
+      # talk to the driver, while host-mounting always matches by definition.
+      - /usr/lib/libDeckLinkAPI.so:/usr/lib/libDeckLinkAPI.so:ro
       # Optional card-global preferences (§5.2):
       # - /etc/blackmagic/BlackmagicPreferences.xml:/etc/blackmagic/BlackmagicPreferences.xml:ro
     # §5.3: only needed with RT_SCHED=true
@@ -22,6 +40,7 @@ services:
       - "9080:9080" # /livez /readyz /statusz
       - "9090:9090" # /metrics
     environment:
+      DECKLINK_LIB_MODE: hostmount # see the libDeckLinkAPI.so mount above
       MXL_DECKLINK_CARD_ID: "0xa1b2c3d4"
       MXL_DECKLINK_CARD_PROFILE: "two-half-duplex"
       MXL_DOMAIN_PATH: /dev/shm/mxl
