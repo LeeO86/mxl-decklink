@@ -26,16 +26,27 @@ MXL v1.0.1 API rather than the spec's paraphrase of it).
   reconnect; signal-loss standby + stream reset; auto format detection with
   flow replacement (new UUID) on format change; card-profile ownership with
   fail-fast (exit 2) on external profile changes.
-- **Ops**: `/livez`, `/readyz`, `/statusz` on `HEALTH_PORT` (default 9080),
-  Prometheus `/metrics` on `METRICS_PORT` (default 9090), structured JSON
+- **Ops + web control** (spec §7.1 / §7.5): one consolidated HTTP port
+  `WEB_PORT` (default 8080) serves `/livez`, `/readyz`, `/statusz`, Prometheus
+  `/metrics`, and — when `WEB_ENABLE=true` — the embedded Vue SPA + REST API
+  (dashboard, per-channel forms that adapt to the matched card's sub-devices,
+  live DeckLink SDK status, MXL domain/flow browser with flow→output
+  assignment and domain creation; domain deletion is not supported).
+  Per-channel changes apply at runtime; global changes are flagged
+  `restart_required`. Unauthenticated by design — keep it on protected
+  networks or set `WEB_ENABLE=false` (health/metrics remain). Structured JSON
   logging.
-- **Config**: environment variables only — global `MXL_*`/ops variables plus
-  indexed `CHx_*` per-channel blocks; fully backward compatible with the
-  v1.0 single-channel variable set. Invalid config exits 78 (`EX_CONFIG`).
+- **Config**: environment variables, optionally layered over a JSON
+  configuration file (`MXL_CONFIG_FILE`, spec §4.5) that the web interface
+  persists to. Precedence: env > file > default; env-set keys are shown
+  read-only in the UI. Indexed `CHx_*` per-channel blocks; fully backward
+  compatible with the v1.0 single-channel variable set. Invalid config exits
+  78 (`EX_CONFIG`).
 
 ## Building
 
-Requirements: Linux, CMake ≥ 3.24, GCC ≥ 12 or Clang ≥ 16, and an installed
+Requirements: Linux, CMake ≥ 3.24, GCC ≥ 12 or Clang ≥ 16, Node.js ≥ 20
+(for the Vue web UI build), and an installed
 [MXL](https://github.com/dmf-mxl/mxl) v1.0.1 (`find_package(mxl)`).
 
 ```bash
@@ -81,25 +92,39 @@ docker build -f docker/Dockerfile \
 ## Running
 
 Host prerequisites (§5.4): Blackmagic Desktop Video ≥ 16.0 with the
-`blackmagic`/`blackmagic-io` kernel modules loaded, a tmpfs MXL domain
-(default `/dev/shm/mxl`), and TAI-disciplined system time (chrony with a
-correct kernel TAI offset).
+`blackmagic`/`blackmagic-io` kernel modules loaded, a tmpfs MXL domain, and
+TAI-disciplined system time (chrony with a correct kernel TAI offset).
 
-Two deployment lessons from field testing (details in SPECIFICATION.md §5 and
-`docker/docker-compose.yaml`):
+Recommended host tmpfs (CBC [`mxl-hands-on`](https://github.com/cbcrc/mxl-hands-on)
+pattern — see `docker/docker-compose.yaml` for the full Compose example):
 
-- **Run the container as the uid/gid that owns the MXL domain directory**
-  (e.g. `user: "1000:1000"` in compose). All containers sharing a domain must
-  agree on ownership, because MXL flows are plain files in the shared tmpfs.
-- **Prefer `DECKLINK_LIB_MODE=hostmount`** (bind-mount the host's
-  `libDeckLinkAPI.so` read-only) over the bundled library: the bundled `.deb`
-  only works when it exactly matches the host driver version.
+```bash
+sudo mkdir -p /Volumes/mxl && sudo chown 1000:1000 /Volumes/mxl
+echo 'tmpfs /Volumes/mxl tmpfs defaults,noatime,size=8G,uid=1000,gid=1000,mode=0755 0 0' \
+  | sudo tee -a /etc/fstab
+sudo mount /Volumes/mxl
+mkdir -p /Volumes/mxl/mxl
+```
 
-Minimal single-channel example:
+Deployment lessons from field testing (details in SPECIFICATION.md §5):
+
+- **Run as the uid/gid that owns the MXL domain** (e.g. `user: "1000:1000"`)
+  and add the host `video` group (`group_add: [video]`) so `/dev/blackmagic`
+  (`root:video` 0660) is accessible.
+- **Prefer `DECKLINK_LIB_MODE=hostmount`** — bind-mount the host's
+  `libDeckLinkAPI.so` read-only (path often
+  `/usr/lib/x86_64-linux-gnu/libDeckLinkAPI.so` on Debian/Ubuntu; confirm with
+  `find /usr -name 'libDeckLinkAPI.so'`). The bundled `.deb` only works when it
+  exactly matches the host driver version.
+- **Mount a dedicated MXL tmpfs** (`/Volumes/mxl`), not the host's whole
+  `/dev/shm`, so unrelated shared-memory files stay out of the container.
+  Mount only one domain subdirectory when sibling discovery is not needed.
+
+Minimal single-channel example (local/CI can keep using `/dev/shm/mxl`):
 
 ```bash
 MXL_DECKLINK_CARD_ID=0xa1b2c3d4 \
-MXL_DOMAIN_PATH=/dev/shm/mxl \
+MXL_DOMAIN_PATH=/Volumes/mxl/mxl \
 CH0_DIRECTION=input \
 CH0_SUBDEVICE_INDEX=0 \
 CH0_VIDEO_MODE=auto \
@@ -107,12 +132,18 @@ CH0_MXL_VIDEO_FLOW_ID=5fbec3b1-1b0f-417d-9059-8b94a47197ed \
 CH0_MXL_AUDIO_FLOW_ID=b3bb5be7-9fe9-4324-a5bb-4c70e1084449 \
 ./build/mxl-decklink
 ```
-
 The full variable reference is SPECIFICATION.md §4 (global) and §4.2
 (per-channel `CHx_*`). Docker Compose and Kubernetes examples live in
 [`docker/docker-compose.yaml`](docker/docker-compose.yaml),
 [`deploy/mxl-decklink.yaml`](deploy/mxl-decklink.yaml) and
 [`deploy/generic-device-plugin.yaml`](deploy/generic-device-plugin.yaml).
+
+Then open the web interface at `http://<host>:8080/` for interactive setup:
+mount a config volume and set `MXL_CONFIG_FILE=/config/mxl-decklink.json` so
+changes persist. The Settings tab renders the effective configuration as a
+copyable `KEY=value` block if you prefer to freeze a web-configured setup
+back into environment variables (which then override the file and become
+read-only in the UI).
 
 ### Exit codes
 

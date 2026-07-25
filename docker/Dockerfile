@@ -6,7 +6,18 @@
 #   DESKTOPVIDEO_DEB_URL  optional URL of the Blackmagic Desktop Video
 #                         user-space .deb (bundled mode). When empty, the image
 #                         expects libDeckLinkAPI.so bind-mounted from the host
-#                         (DECKLINK_LIB_MODE=hostmount).
+#                         (DECKLINK_LIB_MODE=hostmount). Pass via
+#                         --build-arg or the DESKTOPVIDEO_DEB_URL repository
+#                         secret / variable in the container workflow.
+
+# ---------------------------------------------------------------------------
+# Vue web UI (§7.5) — builds a single-file dist/index.html for embedding.
+FROM node:22-bookworm AS webui
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci --no-fund --no-audit
+COPY web/ ./
+RUN npm run build
 
 # ---------------------------------------------------------------------------
 FROM ubuntu:24.04 AS build
@@ -36,10 +47,12 @@ RUN git clone --branch "${MXL_REF}" https://github.com/dmf-mxl/mxl /tmp/mxl \
 # The application. The DeckLink interface headers are vendored in-tree;
 # libDeckLinkAPI.so is dlopen'ed at runtime, never linked (§5.1).
 COPY . /src
+COPY --from=webui /web/dist /src/web/dist
 RUN cmake -S /src -B /src/build -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         "-DCMAKE_PREFIX_PATH=/opt/mxl;/tmp/mxl/build/vcpkg_installed/x64-linux" \
         -DMXL_DECKLINK_BUILD_TESTS=ON \
+        -DMXL_DECKLINK_USE_PREBUILT_WEBUI=ON \
     && cmake --build /src/build -j"$(nproc)" \
     && LD_LIBRARY_PATH=/opt/mxl/lib /src/build/unit-tests
 
@@ -55,6 +68,8 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 # Optional bundled Desktop Video user-space package (§5.1 stage 2). The DKMS
 # kernel-module part is expected to fail inside the container — the modules
 # come from the host. The installed version MUST match the host driver.
+# Blackmagic packages are not freely downloadable without credentials, so CI
+# only bakes this in when DESKTOPVIDEO_DEB_URL is provided (build-arg / secret).
 RUN if [ -n "${DESKTOPVIDEO_DEB_URL}" ]; then \
         curl -fsSL -o /tmp/desktopvideo.deb "${DESKTOPVIDEO_DEB_URL}" \
         && (dpkg -i /tmp/desktopvideo.deb || apt-get -f install -y --no-install-recommends) \
@@ -72,5 +87,5 @@ RUN useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin mxl \
     && usermod -aG video mxl
 USER 10001:10001
 
-EXPOSE 9080 9090
+EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

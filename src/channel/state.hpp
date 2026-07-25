@@ -48,18 +48,32 @@ namespace mxldl::channel
         // rarely (statusz/metrics), written on format changes only.
         std::string activeVideoFlowId() const
         {
-            std::lock_guard const lock{_flowIdMutex};
+            std::lock_guard const lock{_stringMutex};
             return _activeVideoFlowId;
         }
 
         void setActiveVideoFlowId(std::string id)
         {
-            std::lock_guard const lock{_flowIdMutex};
+            std::lock_guard const lock{_stringMutex};
             _activeVideoFlowId = std::move(id);
         }
 
+        /// The video mode the channel currently runs (auto-detect updates it).
+        std::string activeModeName() const
+        {
+            std::lock_guard const lock{_stringMutex};
+            return _activeModeName;
+        }
+
+        void setActiveModeName(std::string name)
+        {
+            std::lock_guard const lock{_stringMutex};
+            _activeModeName = std::move(name);
+        }
+
     private:
-        mutable std::mutex _flowIdMutex;
+        mutable std::mutex _stringMutex;
         std::string _activeVideoFlowId;
+        std::string _activeModeName;
     };
 }

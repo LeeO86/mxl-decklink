@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -134,12 +135,23 @@ namespace mxldl::dl
             }
         }
 
+        /// Live status shared between a sub-device and its active capture
+        /// session so the Card tab shows real values for the mock too.
+        struct MockSharedStatus
+        {
+            std::atomic<bool> signalLocked{false};
+            std::atomic<std::uint32_t> currentModeBmd{0};
+            std::atomic<bool> capturing{false};
+            std::atomic<bool> playing{false};
+        };
+
         // ------------------------------------------------------------------
         class MockCaptureSession final : public ICaptureSession
         {
         public:
-            explicit MockCaptureSession(MockOptions options)
+            MockCaptureSession(MockOptions options, std::shared_ptr<MockSharedStatus> shared)
                 : _options(std::move(options))
+                , _shared(std::move(shared))
             {}
 
             ~MockCaptureSession() override
@@ -161,6 +173,11 @@ namespace mxldl::dl
                 {
                     return std::nullopt;
                 }
+                if (_shared)
+                {
+                    _shared->capturing.store(true);
+                    _shared->currentModeBmd.store(_params.mode.bmdDisplayMode);
+                }
                 _thread = std::thread([this] {
                     generatorLoop();
                 });
@@ -174,6 +191,11 @@ namespace mxldl::dl
                 {
                     _thread.join();
                 }
+                if (_shared)
+                {
+                    _shared->capturing.store(false);
+                    _shared->signalLocked.store(false);
+                }
             }
 
             void resetStreams() override
@@ -186,6 +208,10 @@ namespace mxldl::dl
                 std::lock_guard const lock{_modeMutex};
                 _params.mode = mode;
                 _modeChanged.store(true);
+                if (_shared)
+                {
+                    _shared->currentModeBmd.store(mode.bmdDisplayMode);
+                }
                 return std::nullopt;
             }
 
@@ -250,6 +276,10 @@ namespace mxldl::dl
                         signalLost = true;
                     }
                     _inSignalLoss.store(signalLost);
+                    if (_shared)
+                    {
+                        _shared->signalLocked.store(!signalLost);
+                    }
 
                     // Fault injection: format change (fires once).
                     if (_options.formatChangeAfterFrames >= 0 && frameCounter == static_cast<std::uint64_t>(_options.formatChangeAfterFrames) &&
@@ -353,6 +383,7 @@ namespace mxldl::dl
             }
 
             MockOptions _options;
+            std::shared_ptr<MockSharedStatus> _shared;
             Params _params;
             CaptureCallbacks _callbacks;
             std::atomic<bool> _running{false};
@@ -367,6 +398,10 @@ namespace mxldl::dl
         class MockPlaybackSession final : public IPlaybackSession
         {
         public:
+            explicit MockPlaybackSession(std::shared_ptr<MockSharedStatus> shared)
+                : _shared(std::move(shared))
+            {}
+
             ~MockPlaybackSession() override
             {
                 disable();
@@ -414,6 +449,10 @@ namespace mxldl::dl
                 {
                     return std::nullopt;
                 }
+                if (_shared)
+                {
+                    _shared->playing.store(true);
+                }
                 _thread = std::thread([this] {
                     playbackLoop();
                 });
@@ -426,6 +465,10 @@ namespace mxldl::dl
                 if (_thread.joinable())
                 {
                     _thread.join();
+                }
+                if (_shared)
+                {
+                    _shared->playing.store(false);
                 }
                 if (wasRunning && _callbacks.onPlaybackStopped)
                 {
@@ -497,6 +540,7 @@ namespace mxldl::dl
             std::atomic<std::uint64_t> _nextFrameId{1};
             std::atomic<std::uint32_t> _bufferedFrames{0};
             std::atomic<std::uint32_t> _bufferedAudio{0};
+            std::shared_ptr<MockSharedStatus> _shared;
             std::thread _thread;
         };
 
@@ -506,6 +550,7 @@ namespace mxldl::dl
         public:
             MockSubDevice(MockOptions options, int index)
                 : _options(std::move(options))
+                , _shared(std::make_shared<MockSharedStatus>())
             {
                 _info.persistentId = 0xa1b2c3d4;
                 _info.deviceGroupId = 0xa1b2c3d4;
@@ -528,18 +573,44 @@ namespace mxldl::dl
                 return true;
             }
 
+            SubDeviceStatus status() override
+            {
+                SubDeviceStatus s;
+                s.inputSignalLocked = _shared->signalLocked.load();
+                s.referenceLocked = true;
+                s.captureBusy = _shared->capturing.load();
+                s.playbackBusy = _shared->playing.load();
+                if (auto const bmd = _shared->currentModeBmd.load(); bmd != 0)
+                {
+                    if (auto const m = config::lookupVideoModeByBmd(bmd))
+                    {
+                        s.currentInputMode = m->name;
+                        if (s.inputSignalLocked)
+                        {
+                            s.detectedInputMode = m->name;
+                        }
+                    }
+                }
+                s.currentInputPixelFormat = "10BitYUV";
+                s.pcieLinkWidth = 8;
+                s.pcieLinkSpeed = 3;
+                s.temperatureC = 42.0;
+                return s;
+            }
+
             std::unique_ptr<ICaptureSession> openCapture() override
             {
-                return std::make_unique<MockCaptureSession>(_options);
+                return std::make_unique<MockCaptureSession>(_options, _shared);
             }
 
             std::unique_ptr<IPlaybackSession> openPlayback() override
             {
-                return std::make_unique<MockPlaybackSession>();
+                return std::make_unique<MockPlaybackSession>(_shared);
             }
 
         private:
             MockOptions _options;
+            std::shared_ptr<MockSharedStatus> _shared;
             SubDeviceInfo _info;
         };
 

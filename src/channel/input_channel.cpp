@@ -197,6 +197,7 @@ namespace mxldl::channel
         try
         {
             _currentMode = _cfg.isAutoMode() ? autoStartMode() : *_cfg.videoMode;
+            _status.setActiveModeName(_currentMode.name);
 
             // §3.10 step 5: verify the mode (explicit modes only; §3.2).
             if (!_cfg.isAutoMode() && !_subDevice.supportsMode(_currentMode, config::Direction::Input))
@@ -551,6 +552,7 @@ namespace mxldl::channel
             return; // supervisor loop re-runs bringUp with backoff
         }
         _currentMode = fc.newMode;
+        _status.setActiveModeName(_currentMode.name);
 
         // §3.8: release writers, grace period, then a new flow UUID.
         destroyWriters();

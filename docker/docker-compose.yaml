@@ -1,5 +1,30 @@
 # Example single-card deployment (SPECIFICATION.md §5): one input channel and
-# one output channel on a DeckLink Duo 2, MXL domain on the host's /dev/shm.
+# one output channel on a DeckLink Duo 2.
+#
+# Host prep — dedicated MXL tmpfs (CBC mxl-hands-on pattern):
+#   sudo mkdir -p /Volumes/mxl
+#   sudo chown 1000:1000 /Volumes/mxl
+#   echo 'tmpfs /Volumes/mxl tmpfs defaults,noatime,size=8G,uid=1000,gid=1000,mode=0755 0 0' \
+#     | sudo tee -a /etc/fstab
+#   sudo mount /Volumes/mxl
+#   mkdir -p /Volumes/mxl/mxl   # domain directory used below
+# Size the tmpfs per SPECIFICATION.md §6.3 (512M is enough for the hands-on
+# workshop; DeckLink HD/UHD rings need more).
+#
+# Using a dedicated tmpfs at /Volumes/mxl (instead of bind-mounting the host's
+# whole /dev/shm) matches cbcrc/mxl-hands-on and keeps unrelated host shared-
+# memory files out of the container. Prefer mounting only one domain
+# subdirectory (e.g. /Volumes/mxl/mxl) for locked-down deployments that do
+# not need sibling-domain discovery (§7.6).
+
+volumes:
+  mxl:
+    driver: local
+    driver_opts:
+      type: none
+      device: /Volumes/mxl
+      o: "bind,nosuid,strictatime"
+
 services:
   mxl-decklink:
     build:
@@ -9,41 +34,51 @@ services:
     # host. MXL flows are plain files in the shared tmpfs: every cooperating
     # container must be able to read AND write them, so all MXL media
     # functions on a host should agree on one uid/gid (or a shared group) for
-    # the domain. The image's built-in user is 10001; if your domain directory
-    # is owned by e.g. uid 1000 (the default first user on most distros, and
-    # what other MXL containers like the mxl-hands-on functions typically
-    # use), override it here:
+    # the domain. The image's built-in user is 10001; mxl-hands-on examples
+    # and the fstab line above use 1000:1000.
     user: "1000:1000"
+    # DeckLink device nodes are typically root:video mode 0660. Primary gid
+    # 1000 matches the domain owner; group_add grants access to /dev/blackmagic.
+    group_add:
+      - video
     # §5.2: device nodes via --device (sets cgroup rules, unlike bind mounts).
     devices:
       - /dev/blackmagic:/dev/blackmagic
     volumes:
-      # Mount the whole host shared-memory tmpfs (not just one domain
-      # subdirectory). This matches the CBC mxl-hands-on media-function
-      # pattern and lets the container discover other domains and (with the
-      # web UI, see the feature roadmap) create new ones. MXL_DOMAIN_PATH
-      # then points at one domain directory inside this mount.
-      - /dev/shm:/dev/shm
+      # Whole dedicated MXL tmpfs (sibling domain discovery + creation).
+      - type: volume
+        source: mxl
+        target: /Volumes/mxl
       # Recommended (§5.1): bind-mount the host's libDeckLinkAPI.so instead of
-      # bundling it. The bundled-package pattern only works when the .deb baked
-      # into the image EXACTLY matches the host kernel driver version —
-      # field testing showed version skew makes the bundled library fail to
-      # talk to the driver, while host-mounting always matches by definition.
-      - /usr/lib/libDeckLinkAPI.so:/usr/lib/libDeckLinkAPI.so:ro
+      # bundling it. The host path varies by distro/packaging — locate it with
+      #   find /usr -name 'libDeckLinkAPI.so' 2>/dev/null
+      # Common locations:
+      #   /usr/lib/x86_64-linux-gnu/libDeckLinkAPI.so   (Debian/Ubuntu)
+      #   /usr/lib/libDeckLinkAPI.so                    (some vendor layouts)
+      # Mount it to /usr/lib/libDeckLinkAPI.so inside the container (the path
+      # the process dlopens). The bundled-package pattern only works when the
+      # .deb baked into the image EXACTLY matches the host kernel driver.
+      - /usr/lib/x86_64-linux-gnu/libDeckLinkAPI.so:/usr/lib/libDeckLinkAPI.so:ro
       # Optional card-global preferences (§5.2):
       # - /etc/blackmagic/BlackmagicPreferences.xml:/etc/blackmagic/BlackmagicPreferences.xml:ro
+      # Config volume (§4.5): the web interface persists settings here; the
+      # directory must be writable by the container user above.
+      - ./mxl-decklink-config:/config
     # §5.3: only needed with RT_SCHED=true
     cap_add:
       - SYS_NICE
       - IPC_LOCK
     ports:
-      - "9080:9080" # /livez /readyz /statusz
-      - "9090:9090" # /metrics
+      # Consolidated HTTP port (§7.1): web UI, /api, /livez /readyz /statusz, /metrics.
+      # Protected operations networks only — the UI is unauthenticated (§7.5.5).
+      - "8080:8080"
     environment:
       DECKLINK_LIB_MODE: hostmount # see the libDeckLinkAPI.so mount above
+      MXL_CONFIG_FILE: /config/mxl-decklink.json # §4.5 file layer (web UI persistence)
+      MXL_DOMAIN_SCAN_PATH: /Volumes/mxl # domain discovery root (§7.6)
       MXL_DECKLINK_CARD_ID: "0xa1b2c3d4"
       MXL_DECKLINK_CARD_PROFILE: "two-half-duplex"
-      MXL_DOMAIN_PATH: /dev/shm/mxl
+      MXL_DOMAIN_PATH: /Volumes/mxl/mxl
       MXL_TIMESTAMP_SOURCE: hardware
       RT_SCHED: "true"
       MXL_REALTIME_PRIORITY: "50"
@@ -69,7 +104,7 @@ services:
       CH1_MXL_AUDIO_FLOW_ID: 9126cc2f-4c26-4c9b-a6cd-93c4381c9be5
       CH1_LABEL: studio-a-pgm-out
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:9080/readyz"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/readyz"]
       interval: 5s
       timeout: 3s
       start_period: 30s

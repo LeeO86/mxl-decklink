@@ -478,6 +478,18 @@ namespace mxldl::config
         };
     }
 
+    bool globalPartEquals(Config const& a, Config const& b)
+    {
+        return a.cardId == b.cardId && a.cardName == b.cardName && a.cardIndex == b.cardIndex && a.cardProfile == b.cardProfile &&
+               a.domainPath == b.domainPath && a.timestampSource == b.timestampSource && a.hugepagePath == b.hugepagePath &&
+               a.cpuPinList == b.cpuPinList && a.realtimePriority == b.realtimePriority && a.rtSched == b.rtSched &&
+               a.ptpInterface == b.ptpInterface && a.webEnable == b.webEnable &&
+               a.webPort == b.webPort && a.domainScanPath == b.domainScanPath && a.minHealthyChannels == b.minHealthyChannels &&
+               a.signalLossTimeoutS == b.signalLossTimeoutS && a.startupMaxRetries == b.startupMaxRetries &&
+               a.shutdownTimeoutS == b.shutdownTimeoutS && a.logLevel == b.logLevel && a.logFormat == b.logFormat && a.libMode == b.libMode &&
+               a.backend == b.backend;
+    }
+
     char const* directionName(Direction d)
     {
         return d == Direction::Input ? "input" : "output";
@@ -616,17 +628,26 @@ namespace mxldl::config
         {
             cfg.ptpInterface = *v;
         }
-        if (auto const v = env.get("HEALTH_PORT"))
+        if (auto const v = env.get("WEB_ENABLE"))
         {
-            cfg.healthPort = parseInt("HEALTH_PORT", *v, 1, 65535);
+            cfg.webEnable = parseBool("WEB_ENABLE", *v);
         }
-        if (auto const v = env.get("METRICS_PORT"))
+        if (auto const v = env.get("WEB_PORT"))
         {
-            cfg.metricsPort = parseInt("METRICS_PORT", *v, 1, 65535);
+            cfg.webPort = parseInt("WEB_PORT", *v, 1, 65535);
         }
-        if (cfg.healthPort == cfg.metricsPort)
+        if (env.has("HEALTH_PORT") || env.has("METRICS_PORT"))
         {
-            fail("HEALTH_PORT and METRICS_PORT must differ");
+            // v1.2: everything is consolidated on WEB_PORT (§7.1).
+            fail("HEALTH_PORT/METRICS_PORT were removed in v1.2: health endpoints and /metrics are served on WEB_PORT");
+        }
+        if (auto const v = env.get("MXL_CONFIG_FILE"))
+        {
+            cfg.configFile = *v;
+        }
+        if (auto const v = env.get("MXL_DOMAIN_SCAN_PATH"))
+        {
+            cfg.domainScanPath = *v;
         }
         if (auto const v = env.get("MXL_HEALTH_MIN_HEALTHY_CHANNELS"))
         {

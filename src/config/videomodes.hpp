@@ -24,6 +24,8 @@ namespace mxldl::config
         {
             return static_cast<double>(rateNumerator) / static_cast<double>(rateDenominator);
         }
+
+        bool operator==(VideoMode const&) const = default;
     };
 
     /// nullopt when the name is not in the table (§3.2.1: reject).

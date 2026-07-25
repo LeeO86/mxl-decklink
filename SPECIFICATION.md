@@ -5,8 +5,8 @@
 | | |
 |---|---|
 | **Repository** | `github.com/LeeO86/mxl-decklink` |
-| **Version** | 1.1 (consolidated) |
-| **Date** | July 8, 2026 |
+| **Version** | 1.2 (adds §4.5 configuration file, §7.5 web control interface, §7.6 domain/flow discovery; deployment field notes in §5) |
+| **Date** | July 25, 2026 |
 | **Status** | Implementation-ready specification — no reference code |
 | **Audience** | Broadcast / software engineers familiar with ST 2110, NMOS, containers, and the DeckLink SDK |
 
@@ -61,8 +61,9 @@ The container consists of four logical modules:
 - **Streaming** — per channel, either an `IDeckLinkInput` callback path (capture) or an `IDeckLinkOutput` scheduling loop (playback).
 - **MXL Bridge** — one shared `mxlInstance` per MXL domain, plus per channel a set of `mxlFlowWriter` (or `mxlFlowReader`) handles for video, audio, and optionally ANC.
 - **Ops** — Prometheus metrics, HTTP health endpoints, structured JSON logging.
+- **Control** — the embedded web interface and its REST API (§7.5), the configuration store (§4.5), and MXL domain/flow discovery (§7.6).
 
-All modules share a common **configuration snapshot** structure that is validated at startup from environment variables (§4); after that, the configuration is read-only.
+All modules share a common **configuration snapshot** structure that is validated at startup (§4). The **global (card-wide) part is immutable for the lifetime of the process**; the **per-channel part can be changed at runtime** through the web interface / REST API with per-channel apply semantics (§7.5.3). Every accepted change is validated against the complete §4.3 rule set before it takes effect.
 
 ### 2.3 Data Flow, Input Path (DeckLink → MXL)
 
@@ -192,15 +193,15 @@ Multi-channel operation uses **indexed prefixes `CHx_…`** (x = 0..15), one pre
 | `MXL_DECKLINK_CARD_NAME` | String | — | see above | Human-readable name from `GetDisplayName`, e.g. `"DeckLink Duo 2"`. |
 | `MXL_DECKLINK_CARD_INDEX` | Integer ≥0 | — | see above | Fallback: zero-based card index in enumeration order. Not reboot-stable; lab use only. |
 | `MXL_DECKLINK_CARD_PROFILE` | enum | — | no | Card profile applied at startup (SDI cards only): `one-full-duplex`, `two-half-duplex`, `four-half-duplex`, `one-half-duplex`. Ignored on profile-less cards (IP 100G). |
-| `MXL_DOMAIN_PATH` | Filesystem path | `/dev/shm/mxl` | no | Domain directory; must be a tmpfs mount. Expected to be mounted, not created by the container. |
+| `MXL_DOMAIN_PATH` | Filesystem path | `/dev/shm/mxl` | no | Domain directory; must be tmpfs-backed. Expected to be mounted, not created by the container. Production examples use `/Volumes/mxl/<domain>` (CBC `mxl-hands-on` pattern, §5.2). |
 | `MXL_TIMESTAMP_SOURCE` | enum | `hardware` | no | `hardware` (hardware reference clock) or `host` (`CLOCK_TAI`). |
 | `MXL_HUGEPAGE_PATH` | Filesystem path | — | no | Optional HugePages mount used as backing for grain buffers (UHD scale-out; see §6.4). |
 | `MXL_CPU_PIN_LIST` | CPU list | — | no | Comma-separated CPU list for pinning; overrides Kubernetes CPU-manager assignment. Use outside Kubernetes only. |
 | `MXL_REALTIME_PRIORITY` | Integer 1–99 | `50` | no | `SCHED_FIFO` priority for streaming threads. Requires `RT_SCHED=true`. |
 | `RT_SCHED` | bool | `false` | no | Enables `SCHED_FIFO` for streaming threads (requires `CAP_SYS_NICE`). |
 | `MXL_PTP_INTERFACE` | Interface name | — | no | Network interface for PTP status correlation (IP cards); informational for health/metrics. |
-| `HEALTH_PORT` | Port | `9080` | no | HTTP port for `/livez`, `/readyz`, `/statusz`. |
-| `METRICS_PORT` | Port | `9090` | no | HTTP port for `/metrics` (Prometheus). |
+| `WEB_ENABLE` | bool | `true` | no | Enables the embedded web interface and its mutating REST API (§7.5). Health endpoints and `/metrics` are always served. |
+| `WEB_PORT` | Port | `8080` | no | Consolidated HTTP port for the web UI, `/api/…`, `/livez` `/readyz` `/statusz`, and `/metrics` (§7.1). |
 | `MXL_HEALTH_MIN_HEALTHY_CHANNELS` | Integer | `1` | no | Readiness threshold; see §7.2. Set to the total configured channel count for strict "all channels up" semantics. |
 | `SIGNAL_LOSS_TIMEOUT_S` | Integer | `30` | no | Input channels: window without signal after which a stream reset cycle is triggered. |
 | `STARTUP_MAX_RETRIES` | Integer | `10` | no | Retry counter for card-level startup. |
@@ -208,6 +209,8 @@ Multi-channel operation uses **indexed prefixes `CHx_…`** (x = 0..15), one pre
 | `LOG_LEVEL` | enum | `info` | no | `trace`/`debug`/`info`/`warn`/`error`. |
 | `LOG_FORMAT` | enum | `json` | no | `json` (structured) or `text`. |
 | `DECKLINK_LIB_MODE` | enum | `bundled` | no | `bundled` (libDeckLinkAPI.so from image) or `hostmount` (bind-mounted from host); documentation of the chosen pattern, see §5.1. |
+| `MXL_CONFIG_FILE` | Filesystem path | — | no | Path of the JSON configuration file (§4.5). When set, the file supplies the file layer of the configuration; the web interface persists changes to it. Mounted as a config volume in container deployments. |
+| `MXL_DOMAIN_SCAN_PATH` | Filesystem path | `/dev/shm` | no | Root directory scanned for MXL domains (§7.6). Prefer a dedicated tmpfs (e.g. `/Volumes/mxl`) over mounting the host's whole `/dev/shm` (§5.2). |
 
 ### 4.2 Per-Channel Configuration (Prefix `CHx_`)
 
@@ -245,6 +248,18 @@ All environment variables are validated at startup; invalid values exit with cod
 
 If **no** `CHx_…` variables are present, but the legacy v1.0 single-channel variables are set (`DIRECTION`, `DECKLINK_DEVICE_ID`/`_NAME`/`_INDEX`, `VIDEO_MODE`, `MXL_VIDEO_FLOW_ID`, `MXL_AUDIO_FLOW_ID`, …), the container interprets them as an implicit channel 0 (`CH0_…`), with the legacy device selector resolving to (card, sub-device) automatically. All v1.0 deployments therefore run unchanged. If v1.0 and v1.1 variables are **mixed**, the container terminates at startup with a clear error.
 
+### 4.5 Configuration File and Precedence
+
+Pure environment-variable configuration is complete but tedious for interactive setup work (many `CHx_…` blocks per card). The container therefore supports an optional **JSON configuration file** as a second configuration layer, designed for a mounted config volume:
+
+- **Location**: `MXL_CONFIG_FILE` (e.g. `/config/mxl-decklink.json`). Absent variable ⇒ no file layer; the file not existing yet is not an error (it is created on first save from the web interface).
+- **Format**: one flat JSON object whose keys are **exactly the §4.1/§4.2 environment-variable names** and whose values are strings, e.g. `{"CH0_DIRECTION": "input", "CH0_VIDEO_MODE": "auto", …}`. This keeps a single schema, a single validator, full GitOps diffability, and a trivial mapping for operators who later want to freeze a web-configured setup into environment variables.
+- **Precedence**: **environment > file > built-in default.** An environment variable always wins over the same key in the file; the web interface renders such settings read-only with a "set via environment" marker (§7.5.2).
+- **Scope**: the file layer may carry any configuration key. Changes to **per-channel keys** apply at runtime (§7.5.3). Changes to **global keys** (card selection, profile, domain path, ports, RT settings, …) are persisted but only take effect on the next process start; the API response and the web interface flag them as `restart_required`.
+- **Validation**: the merged effective configuration (env over file) must pass the complete §4.3 validation. A save request producing an invalid merge is rejected atomically — the file is never left in an invalid state. At startup, an invalid file is a configuration error (exit 78) exactly like invalid environment variables.
+- **Legacy interaction**: the file uses v1.1 (`CHx_…`) keys exclusively. Legacy v1.0 environment variables combined with a file that defines channels are a configuration error (§4.4 mixing rule).
+- **Persistence semantics**: writes are atomic (temp file + rename) so cooperating tooling never observes a torn file.
+
 ---
 
 ## 5. Container Specification
@@ -258,14 +273,14 @@ The build is **multi-stage**:
 - **Stage 1 (`build`)** installs `build-essential`, `cmake`, `git`, `pkg-config`, `libssl-dev`, the unpacked DeckLink SDK (header-only, from `Blackmagic_DeckLink_SDK_16.0/Linux/include/`), and the MXL toolchain prerequisites (`vcpkg` bootstrap). It clones `dmf-mxl/mxl` (tag `v1.0.1` or newer), builds with the CMake preset `Linux-GCC-Release`, and installs to `/opt/mxl`. The application is then linked against `mxl::mxl` (via `find_package(mxl CONFIG REQUIRED)`) and the symbols generated from `DeckLinkAPIDispatch.cpp`. Blackmagic's `libDeckLinkAPI.so` is **not** linked at build time — it is loaded at runtime from stage 2.
 - **Stage 2 (`runtime`)** installs the **Blackmagic Desktop Video user-space package** (`desktopvideo_16.0.*_amd64.deb`) via `dpkg -i || apt-get -f install -y`; the kernel-module DKMS part may fail — the modules come from the host. Important: the version installed in the container MUST match the host driver version exactly. Alternatively (**recommended — see field note below**): bind-mount the host's `libDeckLinkAPI.so` and skip the apt package in the container. Both patterns are permitted; `DECKLINK_LIB_MODE` (`bundled`/`hostmount`) documents the choice.
 
-**Field note on `bundled` vs `hostmount` (v1.1 deployment experience).** The bundled pattern is fragile in practice: any skew between the library baked into the image and the host kernel driver makes `libDeckLinkAPI.so` fail to communicate with the driver (device enumeration returns nothing or the API refuses to initialize). Unless the image build is strictly pinned to each host's Desktop Video release, **`DECKLINK_LIB_MODE=hostmount` with a read-only bind mount of the host's `libDeckLinkAPI.so` is the recommended default** — it matches the host driver by definition. At startup the container logs the loaded DeckLink API version (via `IDeckLinkAPIInformation`) so mismatches are diagnosable.
+**Field note on `bundled` vs `hostmount` (v1.1 deployment experience).** The bundled pattern is fragile in practice: any skew between the library baked into the image and the host kernel driver makes `libDeckLinkAPI.so` fail to communicate with the driver (device enumeration returns nothing or the API refuses to initialize). Unless the image build is strictly pinned to each host's Desktop Video release, **`DECKLINK_LIB_MODE=hostmount` with a read-only bind mount of the host's `libDeckLinkAPI.so` is the recommended default** — it matches the host driver by definition. The host path for that library varies by distro (commonly `/usr/lib/x86_64-linux-gnu/libDeckLinkAPI.so` on Debian/Ubuntu, sometimes `/usr/lib/libDeckLinkAPI.so`); locate it with `find /usr -name 'libDeckLinkAPI.so'` and mount it to `/usr/lib/libDeckLinkAPI.so` in the container. At startup the container logs the loaded DeckLink API version as structured event `decklink_api_version` (via `IDeckLinkAPIInformation`) so mismatches are diagnosable.
 
 The application binary lives at `/usr/local/bin/mxl-decklink`. The container entrypoint validates the ENV, checks for `/dev/blackmagic/` and `${MXL_DOMAIN_PATH}`, and starts the binary. The container runs as a **non-root user** (`uid=10001`, group `video` with a GID aligned to the host), with extra capabilities only when `RT_SCHED=true` demands them. The uid/gid can be overridden at deployment time (see §5.3, MXL domain ownership).
 
 ### 5.2 Required Mounts
 
-- **`/dev/blackmagic/`** via `--device` (Docker) or a device plugin (Kubernetes). Plain bind mounts are discouraged because they do not set cgroup device rules.
-- **The host shared-memory tmpfs**, preferably mounted **whole** (e.g. `/dev/shm:/dev/shm`), with `${MXL_DOMAIN_PATH}` (default `/dev/shm/mxl`) pointing at one domain directory inside it. Mounting the whole tmpfs instead of a single domain subdirectory follows the pattern established by the CBC/Radio-Canada `mxl-hands-on` media functions (e.g. `mxl2webrtc`): it allows the container to **discover sibling domains** (directories carrying a `domain_def.json` marker and/or MXL `*.mxl-flow` entries) and to **create new domains** (a plain `mkdir` plus `domain_def.json`/`options.json`, since the MXL SDK itself only opens existing domain directories). A single-domain bind mount remains valid for locked-down deployments.
+- **`/dev/blackmagic/`** via `--device` (Docker) or a device plugin (Kubernetes). Plain bind mounts are discouraged because they do not set cgroup device rules. Device nodes are typically `root:video` mode `0660` — the container must be in the host `video` group (`group_add: [video]` in Compose, or matching `fsGroup` / supplemental groups in Kubernetes) in addition to running as the domain-owner uid/gid.
+- **A dedicated host tmpfs for MXL domains**, following the CBC/Radio-Canada [`mxl-hands-on`](https://github.com/cbcrc/mxl-hands-on) preparation pattern: mount a tmpfs at **`/Volumes/mxl`** (via `/etc/fstab`, sized per §6.3), create domain directories under it (e.g. `/Volumes/mxl/mxl`), and bind-mount **the whole `/Volumes/mxl` tree** into the container. `${MXL_DOMAIN_PATH}` points at one domain directory inside that mount; `${MXL_DOMAIN_SCAN_PATH}` (default `/Volumes/mxl` in the Compose example) is the discovery root (§7.6). Mounting the dedicated volume — rather than the host's whole `/dev/shm` — avoids exposing unrelated host shared-memory files while still allowing sibling-domain discovery and domain creation (plain `mkdir` plus `domain_def.json`/`options.json`; the MXL SDK itself only opens existing domain directories). A **single-domain** bind mount (e.g. only `/Volumes/mxl/mxl`) remains valid for locked-down deployments that do not need discovery. Built-in process defaults remain `/dev/shm/mxl` and `/dev/shm` so local/CI runs without fstab prep still work.
 - **`/etc/blackmagic/BlackmagicPreferences.xml`** optionally read-only, if IP-card configuration (NMOS enable, multicast addresses) is maintained on the host.
 - Optional **HugePages mount** for `MXL_HUGEPAGE_PATH` (see §6.4).
 
@@ -296,7 +311,7 @@ Recommended: **`generic-device-plugin` with one group per physical card that bun
 There is no perfect Kubernetes idiom for cross-pod shared memory; three options:
 
 - **Sidecar model (`emptyDir { medium: Memory }`).** Producer and consumer MediaFunctions deployed as a multi-container pod share an emptyDir memory volume (`sizeLimit` per §6.3). Simple, no root privileges, no node-affinity concerns. Downside: coupled lifecycle. Fits fixed chains (ingest → delay → preview), not loosely coupled routing.
-- **`hostPath` onto a shared host tmpfs.** The host prepares `/dev/shm/mxl` (size via `mount -o remount,size=…` or boot parameter). Pods mount it as `hostPath: {path: /dev/shm/mxl, type: DirectoryOrCreate}`. All cooperating pods require pod affinity **to the same node**. The official MXL example deployment uses this pattern with explicit hostname-bound nodeAffinity. Fits node-local media fabrics until the MXL Fabrics API (RDMA) lands.
+- **`hostPath` onto a shared host tmpfs.** Prefer a dedicated MXL tmpfs such as `/Volumes/mxl` (CBC `mxl-hands-on` `/etc/fstab` pattern; size per §6.3) rather than remounting the node's whole `/dev/shm`. Pods mount it as `hostPath: {path: /Volumes/mxl, type: Directory}` (or a single domain subdirectory for locked-down deployments). All cooperating pods require pod affinity **to the same node**. The official MXL example deployment uses this pattern with explicit hostname-bound nodeAffinity. Fits node-local media fabrics until the MXL Fabrics API (RDMA) lands.
 - **PersistentVolume (hostPath) with `accessModes: [ReadWriteMany]`.** Cluster-admin-managed, cleaner than raw hostPath in the pod spec, identical underneath (cf. `dmf-mxl/mxl/examples/kube-example.yaml`).
 
 ### 6.3 Resource Sizing per Card
@@ -331,11 +346,15 @@ For redundant paths, create one Deployment per physical path (not `replicas: 2`)
 
 ### 7.1 Endpoints
 
-The container exposes three HTTP endpoints on `HEALTH_PORT` plus Prometheus text format on `METRICS_PORT`:
+The container exposes a **single consolidated HTTP port** `WEB_PORT` (default 8080). On that port:
 
 - **`/livez`** returns **200 OK** as long as the process is alive and the housekeeping thread has been active within the last 5 seconds. On deadlock or total failure it times out → Kubernetes kills the pod.
 - **`/readyz`** returns **200 OK** exactly when at least `MXL_HEALTH_MIN_HEALTHY_CHANNELS` channels are in state `healthy`. Below the threshold it returns **503 Service Unavailable** with a JSON body listing per-channel state. Default threshold is 1; for critical broadcast setups set it to the total configured channel count — "ready" then strictly means "all channels up".
 - **`/statusz`** always returns **200 OK** with a full JSON report: per channel its state, last frame timestamp, signal lock, frame drops, reconnect counter, MXL grain commit count.
+- **`/metrics`** serves Prometheus text format.
+- When `WEB_ENABLE=true` (default): the embedded web UI (`/`) and the `/api/…` REST API (§7.5). When `WEB_ENABLE=false`, UI and mutating API are absent; health and metrics remain.
+
+`HEALTH_PORT` / `METRICS_PORT` from earlier revisions are **removed**; setting them is a configuration error.
 
 Recommended probes: `livenessProbe` initialDelay 30 s, period 10 s, failureThreshold 3, timeout 3 s; `readinessProbe` initialDelay 5 s, period 2 s, failureThreshold 2.
 
@@ -354,6 +373,56 @@ All channel-scoped Prometheus metrics carry the labels `card_id`, `channel_index
 ### 7.4 Logging
 
 Structured JSON logging with fields `ts`, `level`, `card_id`, `channel_index`, `channel_label`, `flow_id`, `event`, `details`. All state transitions (signal loss, format change, preroll start, playback start, reset, profile events) are logged. OpenTelemetry traces optional via `OTEL_EXPORTER_OTLP_ENDPOINT`.
+
+### 7.5 Web Control Interface
+
+The container embeds a web interface — a **Vue 3** single-page application built to one HTML file and embedded in the binary (no external assets at runtime) — plus a JSON REST API on the same `WEB_PORT` as health and metrics (§7.1), gated by `WEB_ENABLE` (default true). It is a **control plane for one container/card** — it does not replace NMOS or facility orchestration, and it carries no media data.
+
+#### 7.5.1 Structure
+
+The UI is organized in tabs:
+
+- **Dashboard (index)** — general status: card identity, per-channel state/direction/mode/flow with live counters (frames, drops, reconnects, grain rate), MXL domain in use, process health (uptime, version, MXL SDK version, DeckLink API version when available).
+- **Channels** — the full per-channel configuration (§4.2) as forms. The tab **adapts dynamically to the matched card**: it offers exactly the sub-devices the card exposes (2 for a Duo 2, 8 for a Quad 2 / IP 100G, …) with their capture/playback capabilities, and allows adding, editing, and removing channels within those bounds. For output channels, the video/audio flows can be picked directly from the MXL browser (§7.5.4).
+- **Card** — everything the DeckLink SDK reports per sub-device: detected input video mode (`bmdDeckLinkStatusDetectedVideoInputMode`), current input/output modes and pixel formats, input-signal and reference lock, busy state, PCIe link width/speed, device temperature, profile information.
+- **MXL** — domain and flow browser (§7.6): all domains under `MXL_DOMAIN_SCAN_PATH`, all flows of a selected domain with their descriptors and liveness, plus domain creation. Domain **deletion is not supported** (remove unused domains on the host); the UI states this explicitly.
+- **Settings** — the global (card-wide) configuration and the **environment-variable view**: the effective configuration rendered as a copyable `KEY=value` block for operators who want to persist the current setup as environment variables instead of the config file.
+
+#### 7.5.2 Configuration editing rules
+
+Every setting displays its **provenance** (default / file / environment). Settings supplied by an environment variable are **read-only in the UI** and visibly marked ("set via environment variable — unset it to edit here"), implementing the §4.5 precedence. Edits are validated server-side against the full §4.3 rule set; invalid submissions are rejected with a per-field error message and change nothing.
+
+#### 7.5.3 Apply semantics (dynamic reconfiguration)
+
+- **Per-channel changes** (add/edit/remove a channel, including flow assignment) apply **at runtime**: only the affected channel is stopped and restarted with the new configuration (a brief interruption of that channel; all other channels are untouched — the §3.7 isolation domain is reused). This supersedes the "partial live reload" roadmap item of v1.1.
+- **Global changes** are persisted to the config file but flagged `restart_required`; the Dashboard shows a persistent banner until the process is restarted.
+- Every applied change is written to the config file (§4.5) before it is acted upon, so a crash directly after apply cannot lose the configuration.
+
+#### 7.5.4 Flow-to-output assignment
+
+The MXL tab allows selecting any **video flow** (and matching audio flow) discovered in the attached domain and assigning it to an output channel. The UI derives the required `CHx_VIDEO_MODE` from the flow descriptor (`frame_width`/`frame_height`/`grain_rate`/`interlace_mode`) and warns when no DeckLink mode of the card matches the flow geometry. The assignment is a normal per-channel configuration change (§7.5.3).
+
+#### 7.5.5 Security
+
+The web interface implements **no authentication** — like the health and metrics endpoints it is intended for protected operations networks. Deployments exposing it beyond that must front it with an authenticating reverse proxy / ingress. When `WEB_ENABLE=false`, the UI and mutating `/api/…` routes are not registered (health and metrics stay on `WEB_PORT`). The API never returns environment-variable **values** of settings that look like credentials (none exist in the current schema, but the rule is future-proofing).
+
+#### 7.5.6 REST API (consumed by the UI, usable for automation)
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/api/status` | GET | Dashboard summary (process, card, channels, domain) |
+| `/api/card` | GET | Card + per-sub-device capabilities and live SDK status |
+| `/api/config` | GET | All settings with value, provenance, editability, env-var name |
+| `/api/config` | PUT | Partial update `{key: value \| null}`; validates, persists, applies; reports `restart_required` |
+| `/api/domains` | GET | Scan `MXL_DOMAIN_SCAN_PATH` for domains (§7.6) |
+| `/api/domains` | POST | Create a domain (§7.6) |
+| `/api/flows?domain=…` | GET | List flows of a domain with descriptor + liveness |
+
+### 7.6 MXL Domain and Flow Discovery
+
+- **Domain scan.** A directory under `MXL_DOMAIN_SCAN_PATH` (recursive, bounded depth) is recognized as an MXL domain when it contains a `domain_def.json` marker (the convention established by the CBC/Radio-Canada `mxl-hands-on` ecosystem: `{id, label, description}`), an MXL `options.json`, or at least one `*.mxl-flow` entry. The scan reports path, label/description/id when available, tmpfs backing (via `mxlIsTmpFs`), flow count, and whether it is the domain this container currently uses.
+- **Flow listing.** Flows are enumerated from the domain's `{uuid}.mxl-flow/` directories; each entry reports the flow ID, the parsed `flow_def.json` descriptor (format, media type, label, group hint, geometry/rate or channel count), **liveness** (`mxlIsFlowActive`), and — for discrete flows — the current head index and last write time from the flow's runtime info.
+- **Domain creation.** MXL v1.0.1 deliberately only *opens* existing domain directories (`mxlCreateInstance` fails on a missing directory). Creating a domain is therefore a container-side filesystem operation exposed via `POST /api/domains`: create the directory (must lie under `MXL_DOMAIN_SCAN_PATH`; must be tmpfs-backed or the response carries a warning), write `domain_def.json` (generated `id`, user-supplied `label`/`description`) for ecosystem discoverability, and optionally write `options.json` with a user-supplied history duration (`urn:x-mxl:option:history_duration/v1.0`). Switching the container to the new domain is a global configuration change (`MXL_DOMAIN_PATH`, `restart_required` per §7.5.3). **Domain deletion is intentionally not offered** — operators remove unused domain directories on the host.
 
 ---
 ## 8. Non-Functional Requirements
@@ -390,7 +459,9 @@ Structured JSON logging with fields `ts`, `level`, `card_id`, `channel_index`, `
 
 **External NMOS-controller interaction on rolling updates.** A pod restart interrupts all channels of the card; the controller (e.g. VideoIPath) must compensate via NMOS unregister/register events so routes are not left pointing at dead endpoints. This must be documented operationally.
 
-**Partial live reload (roadmap).** Reconfiguring channel 3 without interrupting channels 1–2 currently requires a pod restart (all channels). A control-plane interface for per-channel live reload (SIGHUP with ENV re-parse, or a UNIX-socket config protocol) is a desirable v-next feature, deliberately excluded here for complexity.
+**Partial live reload — implemented via the web interface (v1.2).** Reconfiguring channel 3 without interrupting channels 1–2 no longer requires a pod restart: per-channel changes through the REST API/web interface (§7.5.3) stop and recreate only the affected channel. Global (card-wide) settings still require a process restart, which the API flags as `restart_required`.
+
+**Web interface exposure.** The embedded web interface (§7.5) is unauthenticated by design (operations-network assumption, like `/metrics`). Exposing `WEB_PORT` beyond a protected network without an authenticating reverse proxy is a deployment error. `WEB_ENABLE=false` removes the UI and mutating API while leaving health and metrics on the same port.
 
 **Multi-node sharing (roadmap).** The MXL Fabrics API (RDMA, libfabric-based) is not part of v1.0. Multi-node deployments must wait or evaluate a sidecar proxy (e.g. `jonasohland/mxl-fabrics-proxy`). Outside container scope, but relevant to deployment architecture.
 

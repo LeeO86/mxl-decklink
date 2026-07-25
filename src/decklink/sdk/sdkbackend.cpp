@@ -125,6 +125,55 @@ namespace mxldl::dl
             return buf;
         }
 
+        std::mutex g_apiVersionMutex;
+        std::string g_apiVersion;
+
+        void recordApiVersion()
+        {
+            ComPtr<IDeckLinkAPIInformation> info{::CreateDeckLinkAPIInformationInstance()};
+            if (!info)
+            {
+                return;
+            }
+            char const* version = nullptr;
+            if (info->GetString(BMDDeckLinkAPIVersion, &version) == S_OK && version != nullptr)
+            {
+                std::lock_guard const lock{g_apiVersionMutex};
+                g_apiVersion = version;
+                log::info("decklink_api_version", {{"version", version}});
+            }
+        }
+
+        /// Renders a BMDDisplayMode as a table name (§3.2.1) or FourCC.
+        std::optional<std::string> displayModeName(std::int64_t bmd)
+        {
+            if (bmd <= 0)
+            {
+                return std::nullopt;
+            }
+            if (auto const m = config::lookupVideoModeByBmd(static_cast<std::uint32_t>(bmd)))
+            {
+                return m->name;
+            }
+            char buf[5] = {static_cast<char>((bmd >> 24) & 0xff), static_cast<char>((bmd >> 16) & 0xff), static_cast<char>((bmd >> 8) & 0xff),
+                static_cast<char>(bmd & 0xff), 0};
+            return std::string(buf);
+        }
+
+        std::optional<std::string> pixelFormatName(std::int64_t v)
+        {
+            switch (static_cast<std::uint32_t>(v))
+            {
+                case bmdFormat8BitYUV: return "8BitYUV";
+                case bmdFormat10BitYUV: return "10BitYUV";
+                case bmdFormat8BitARGB: return "8BitARGB";
+                case bmdFormat8BitBGRA: return "8BitBGRA";
+                case bmdFormat10BitRGB: return "10BitRGB";
+                case bmdFormat12BitRGB: return "12BitRGB";
+                default: return v > 0 ? std::make_optional(std::to_string(v)) : std::nullopt;
+            }
+        }
+
         // ------------------------------------------------------------------
         // Capture
         // ------------------------------------------------------------------
@@ -722,6 +771,64 @@ namespace mxldl::dl
                        supported;
             }
 
+            SubDeviceStatus status() override
+            {
+                SubDeviceStatus s;
+                auto status = _device.queryInterface<IDeckLinkStatus>(IID_IDeckLinkStatus);
+                if (!status)
+                {
+                    return s;
+                }
+                int64_t v = 0;
+                if (status->GetInt(bmdDeckLinkStatusDetectedVideoInputMode, &v) == S_OK)
+                {
+                    s.detectedInputMode = displayModeName(v);
+                }
+                if (status->GetInt(bmdDeckLinkStatusCurrentVideoInputMode, &v) == S_OK)
+                {
+                    s.currentInputMode = displayModeName(v);
+                }
+                if (status->GetInt(bmdDeckLinkStatusCurrentVideoOutputMode, &v) == S_OK)
+                {
+                    s.currentOutputMode = displayModeName(v);
+                }
+                if (status->GetInt(bmdDeckLinkStatusCurrentVideoInputPixelFormat, &v) == S_OK)
+                {
+                    s.currentInputPixelFormat = pixelFormatName(v);
+                }
+                if (status->GetInt(bmdDeckLinkStatusLastVideoOutputPixelFormat, &v) == S_OK)
+                {
+                    s.lastOutputPixelFormat = pixelFormatName(v);
+                }
+                bool flag = false;
+                if (status->GetFlag(bmdDeckLinkStatusVideoInputSignalLocked, &flag) == S_OK)
+                {
+                    s.inputSignalLocked = flag;
+                }
+                if (status->GetFlag(bmdDeckLinkStatusReferenceSignalLocked, &flag) == S_OK)
+                {
+                    s.referenceLocked = flag;
+                }
+                if (status->GetInt(bmdDeckLinkStatusBusy, &v) == S_OK)
+                {
+                    s.captureBusy = (v & bmdDeviceCaptureBusy) != 0;
+                    s.playbackBusy = (v & bmdDevicePlaybackBusy) != 0;
+                }
+                if (status->GetInt(bmdDeckLinkStatusPCIExpressLinkWidth, &v) == S_OK && v > 0)
+                {
+                    s.pcieLinkWidth = v;
+                }
+                if (status->GetInt(bmdDeckLinkStatusPCIExpressLinkSpeed, &v) == S_OK && v > 0)
+                {
+                    s.pcieLinkSpeed = v;
+                }
+                if (status->GetInt(bmdDeckLinkStatusDeviceTemperature, &v) == S_OK && v > 0)
+                {
+                    s.temperatureC = static_cast<double>(v);
+                }
+                return s;
+            }
+
             std::unique_ptr<ICaptureSession> openCapture() override
             {
                 auto input = _device.queryInterface<IDeckLinkInput>(IID_IDeckLinkInput);
@@ -923,6 +1030,9 @@ namespace mxldl::dl
                 {
                     return std::string("CreateDeckLinkIteratorInstance failed: libDeckLinkAPI.so not found or Desktop Video not installed");
                 }
+                // §5.1 field note: log the loaded API version so bundled/host
+                // driver version skew is diagnosable.
+                recordApiVersion();
 
                 std::vector<EnumeratedDevice> devices;
                 ComPtr<IDeckLink> dev;
@@ -1086,5 +1196,11 @@ namespace mxldl::dl
     std::unique_ptr<IBackend> makeSdkBackend()
     {
         return std::make_unique<SdkBackend>();
+    }
+
+    std::string deckLinkApiVersion()
+    {
+        std::lock_guard const lock{g_apiVersionMutex};
+        return g_apiVersion;
     }
 }

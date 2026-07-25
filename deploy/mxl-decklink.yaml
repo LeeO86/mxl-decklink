@@ -42,7 +42,11 @@ spec:
               decklink.mxl.dev/quad2: "1"
           securityContext:
             runAsNonRoot: true
-            runAsUser: 10001
+            runAsUser: 1000
+            runAsGroup: 1000
+            # DeckLink nodes are typically root:video 0660; 44 is video on
+            # Debian/Ubuntu — override for other distros.
+            supplementalGroups: [44]
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
@@ -53,7 +57,9 @@ spec:
             - name: MXL_DECKLINK_CARD_PROFILE
               value: four-half-duplex
             - name: MXL_DOMAIN_PATH
-              value: /dev/shm/mxl
+              value: /Volumes/mxl/mxl
+            - name: MXL_DOMAIN_SCAN_PATH
+              value: /Volumes/mxl
             - name: MXL_TIMESTAMP_SOURCE
               value: hardware
             - name: RT_SCHED
@@ -87,15 +93,16 @@ spec:
             - name: CH1_LABEL
               value: playout-1
           ports:
-            - name: health
-              containerPort: 9080
-            - name: metrics
-              containerPort: 9090
+            # Consolidated HTTP port (§7.1): web UI + REST API + health + metrics.
+            # Unauthenticated — expose only via an authenticating ingress, or
+            # set WEB_ENABLE=false for fixed installations (health/metrics stay).
+            - name: http
+              containerPort: 8080
           # §7.1 recommended probes.
           livenessProbe:
             httpGet:
               path: /livez
-              port: health
+              port: http
             initialDelaySeconds: 30
             periodSeconds: 10
             failureThreshold: 3
@@ -103,25 +110,25 @@ spec:
           readinessProbe:
             httpGet:
               path: /readyz
-              port: health
+              port: http
             initialDelaySeconds: 5
             periodSeconds: 2
             failureThreshold: 2
           volumeMounts:
-            - name: mxl-domain
-              mountPath: /dev/shm/mxl
+            - name: mxl
+              mountPath: /Volumes/mxl
             # Optional (§5.2):
             # - name: bm-preferences
             #   mountPath: /etc/blackmagic/BlackmagicPreferences.xml
             #   readOnly: true
       volumes:
-        # §6.2: hostPath tmpfs for cross-pod sharing; all cooperating pods
-        # need affinity to this node. See SPECIFICATION.md for alternatives
-        # (sidecar emptyDir, PV).
-        - name: mxl-domain
+        # §6.2: dedicated host tmpfs (CBC mxl-hands-on /Volumes/mxl pattern).
+        # Prepare on the node via fstab; all cooperating pods need affinity to
+        # this node. For locked-down deployments mount only one domain subdir.
+        - name: mxl
           hostPath:
-            path: /dev/shm/mxl
-            type: DirectoryOrCreate
+            path: /Volumes/mxl
+            type: Directory
 ---
 apiVersion: v1
 kind: Service
@@ -136,9 +143,6 @@ spec:
     app.kubernetes.io/name: mxl-decklink
     app.kubernetes.io/instance: quad2-a
   ports:
-    - name: health
-      port: 9080
-      targetPort: health
-    - name: metrics
-      port: 9090
-      targetPort: metrics
+    - name: http
+      port: 8080
+      targetPort: http

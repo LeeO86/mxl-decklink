@@ -32,10 +32,81 @@ target_link_libraries(decklink-dispatch PUBLIC ${CMAKE_DL_LIBS})
 target_compile_options(decklink-dispatch PRIVATE -w)
 
 # ------------------------------------------------------------------
+# Embedded web UI (§7.5): Vue SPA → single-file dist/index.html → header
+# ------------------------------------------------------------------
+# Docker multi-stage builds the SPA in a Node image and sets
+# MXL_DECKLINK_USE_PREBUILT_WEBUI=ON. Local / CI builds run `npm ci &&
+# npm run build` here so the embed always tracks web/src.
+set(WEBUI_GENERATED ${CMAKE_CURRENT_BINARY_DIR}/generated/ops/webui_generated.hpp)
+
+option(MXL_DECKLINK_USE_PREBUILT_WEBUI
+    "Embed an existing web/dist/index.html instead of running npm" OFF)
+
+# Explicit source list — avoid GLOB_RECURSE under web/ (it can pick up
+# node_modules/.../src/... and create a ninja cycle on dist/index.html).
+set(WEBUI_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/web/index.html
+    ${CMAKE_CURRENT_SOURCE_DIR}/web/package.json
+    ${CMAKE_CURRENT_SOURCE_DIR}/web/package-lock.json
+    ${CMAKE_CURRENT_SOURCE_DIR}/web/vite.config.js
+    ${CMAKE_CURRENT_SOURCE_DIR}/web/src/main.js
+    ${CMAKE_CURRENT_SOURCE_DIR}/web/src/App.vue
+    ${CMAKE_CURRENT_SOURCE_DIR}/web/src/api.js
+    ${CMAKE_CURRENT_SOURCE_DIR}/web/src/style.css
+    ${CMAKE_CURRENT_SOURCE_DIR}/web/src/components/Pill.vue
+    ${CMAKE_CURRENT_SOURCE_DIR}/web/src/components/SettingField.vue
+    ${CMAKE_CURRENT_SOURCE_DIR}/web/src/components/Dashboard.vue
+    ${CMAKE_CURRENT_SOURCE_DIR}/web/src/components/ChannelsTab.vue
+    ${CMAKE_CURRENT_SOURCE_DIR}/web/src/components/CardTab.vue
+    ${CMAKE_CURRENT_SOURCE_DIR}/web/src/components/MxlTab.vue
+    ${CMAKE_CURRENT_SOURCE_DIR}/web/src/components/SettingsTab.vue
+)
+
+if(MXL_DECKLINK_USE_PREBUILT_WEBUI)
+    set(WEBUI_HTML ${CMAKE_CURRENT_SOURCE_DIR}/web/dist/index.html)
+    if(NOT EXISTS ${WEBUI_HTML})
+        message(FATAL_ERROR "MXL_DECKLINK_USE_PREBUILT_WEBUI=ON but ${WEBUI_HTML} is missing")
+    endif()
+    set(WEBUI_EMBED_COMMENT "Embedding prebuilt web/dist/index.html")
+else()
+    find_program(NPM_EXECUTABLE npm REQUIRED)
+    # Build into the CMake binary dir so the source tree stays clean and the
+    # OUTPUT never collides with a DEPENDS path under web/.
+    set(WEBUI_HTML ${CMAKE_CURRENT_BINARY_DIR}/webui/index.html)
+    add_custom_command(
+        OUTPUT ${WEBUI_HTML}
+        COMMAND ${NPM_EXECUTABLE} ci --no-fund --no-audit
+        COMMAND ${NPM_EXECUTABLE} run build
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/webui
+        COMMAND ${CMAKE_COMMAND} -E copy
+            ${CMAKE_CURRENT_SOURCE_DIR}/web/dist/index.html ${WEBUI_HTML}
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/web
+        DEPENDS ${WEBUI_SOURCES}
+        COMMENT "Building Vue web UI (npm run build)"
+        VERBATIM
+    )
+    set(WEBUI_EMBED_COMMENT "Embedding built web UI")
+endif()
+
+add_custom_command(
+    OUTPUT ${WEBUI_GENERATED}
+    COMMAND ${CMAKE_COMMAND}
+        -DINPUT=${WEBUI_HTML}
+        -DOUTPUT=${WEBUI_GENERATED}
+        -DVAR=indexHtml
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedFile.cmake
+    DEPENDS ${WEBUI_HTML} cmake/EmbedFile.cmake
+    COMMENT ${WEBUI_EMBED_COMMENT}
+)
+
+# ------------------------------------------------------------------
 # Core library (everything except main) so tests can link against it
 # ------------------------------------------------------------------
 add_library(mxl-decklink-core STATIC
+    ${WEBUI_GENERATED}
     src/config/config.cpp
+    src/config/schema.cpp
+    src/config/store.cpp
     src/config/videomodes.cpp
     src/util/logging.cpp
     src/util/taiclock.cpp
@@ -45,6 +116,7 @@ add_library(mxl-decklink-core STATIC
     src/util/uuid.cpp
     src/util/threading.cpp
     src/mxlbridge/domain.cpp
+    src/mxlbridge/domainscan.cpp
     src/mxlbridge/flowdef.cpp
     src/mxlbridge/videowriter.cpp
     src/mxlbridge/videoreader.cpp
@@ -61,8 +133,9 @@ add_library(mxl-decklink-core STATIC
     src/ops/httpserver.cpp
     src/ops/health.cpp
     src/ops/housekeeping.cpp
+    src/ops/webapi.cpp
 )
-target_include_directories(mxl-decklink-core PUBLIC src third_party)
+target_include_directories(mxl-decklink-core PUBLIC src third_party ${CMAKE_CURRENT_BINARY_DIR}/generated)
 target_link_libraries(mxl-decklink-core
     PUBLIC
         mxl::mxl
@@ -91,6 +164,9 @@ if(MXL_DECKLINK_BUILD_TESTS)
         tests/unit/test_uuid.cpp
         tests/unit/test_taiclock.cpp
         tests/unit/test_flowdef.cpp
+        tests/unit/test_store.cpp
+        tests/unit/test_domainscan.cpp
+        tests/unit/test_schema.cpp
     )
     target_link_libraries(unit-tests PRIVATE mxl-decklink-core)
     add_test(NAME unit-tests COMMAND unit-tests)

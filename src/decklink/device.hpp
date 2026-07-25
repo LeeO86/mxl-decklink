@@ -93,6 +93,8 @@ namespace mxldl::dl
 
         [[nodiscard]] virtual SubDeviceInfo const& info() const = 0;
         [[nodiscard]] virtual bool supportsMode(config::VideoMode const& mode, config::Direction direction) = 0;
+        /// Live SDK status snapshot (§7.5 Card tab); cheap enough to poll.
+        virtual SubDeviceStatus status() = 0;
         virtual std::unique_ptr<ICaptureSession> openCapture() = 0;
         virtual std::unique_ptr<IPlaybackSession> openPlayback() = 0;
     };
@@ -141,4 +143,9 @@ namespace mxldl::dl
 
     std::unique_ptr<IBackend> makeSdkBackend();
     std::unique_ptr<IBackend> makeMockBackend(config::EnvReader const& env);
+
+    /// DeckLink API/driver version reported by IDeckLinkAPIInformation, set
+    /// once the SDK backend has loaded the library (§5.1 diagnosability
+    /// field note). Empty for the mock backend / before enumeration.
+    std::string deckLinkApiVersion();
 }

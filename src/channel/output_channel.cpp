@@ -160,6 +160,7 @@ namespace mxldl::channel
         try
         {
             _mode = *_cfg.videoMode;
+            _status.setActiveModeName(_mode.name);
 
             if (!_subDevice.supportsMode(_mode, config::Direction::Output))
             {

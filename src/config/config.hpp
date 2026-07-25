@@ -98,6 +98,8 @@ namespace mxldl::config
         }
 
         [[nodiscard]] int effectiveGrainCount() const;
+
+        bool operator==(ChannelConfig const&) const = default;
     };
 
     struct Config
@@ -115,8 +117,13 @@ namespace mxldl::config
         int realtimePriority = 50;
         bool rtSched = false;
         std::optional<std::string> ptpInterface;
-        int healthPort = 9080;
-        int metricsPort = 9090;
+        // One consolidated HTTP port (§7.1): web UI + REST API + health
+        // endpoints + Prometheus metrics. WEB_ENABLE only gates the UI and
+        // the mutating API; health/metrics are always served.
+        bool webEnable = true;
+        int webPort = 8080;
+        std::optional<std::string> configFile; // §4.5
+        std::string domainScanPath = "/dev/shm"; // §7.6
         int minHealthyChannels = 1;
         int signalLossTimeoutS = 30;
         int startupMaxRetries = 10;
@@ -144,6 +151,10 @@ namespace mxldl::config
     /// Parses and validates the full configuration (§4.1–§4.4).
     /// Throws ConfigError on any violation.
     Config loadConfig(EnvReader const& env);
+
+    /// True when the card-wide (non-channel) parts are identical — used to
+    /// decide `restart_required` for runtime config changes (§7.5.3).
+    bool globalPartEquals(Config const& a, Config const& b);
 
     char const* directionName(Direction d);
     char const* profileName(CardProfile p);
