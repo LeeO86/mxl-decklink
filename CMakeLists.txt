@@ -37,39 +37,55 @@ target_compile_options(decklink-dispatch PRIVATE -w)
 # Docker multi-stage builds the SPA in a Node image and sets
 # MXL_DECKLINK_USE_PREBUILT_WEBUI=ON. Local / CI builds run `npm ci &&
 # npm run build` here so the embed always tracks web/src.
-set(WEBUI_DIST ${CMAKE_CURRENT_SOURCE_DIR}/web/dist/index.html)
 set(WEBUI_GENERATED ${CMAKE_CURRENT_BINARY_DIR}/generated/ops/webui_generated.hpp)
 
 option(MXL_DECKLINK_USE_PREBUILT_WEBUI
     "Embed an existing web/dist/index.html instead of running npm" OFF)
 
-file(GLOB_RECURSE WEBUI_SOURCES CONFIGURE_DEPENDS
-    ${CMAKE_CURRENT_SOURCE_DIR}/web/src/*
+# Explicit source list — avoid GLOB_RECURSE under web/ (it can pick up
+# node_modules/.../src/... and create a ninja cycle on dist/index.html).
+set(WEBUI_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/web/index.html
     ${CMAKE_CURRENT_SOURCE_DIR}/web/package.json
     ${CMAKE_CURRENT_SOURCE_DIR}/web/package-lock.json
     ${CMAKE_CURRENT_SOURCE_DIR}/web/vite.config.js
+    ${CMAKE_CURRENT_SOURCE_DIR}/web/src/main.js
+    ${CMAKE_CURRENT_SOURCE_DIR}/web/src/App.vue
+    ${CMAKE_CURRENT_SOURCE_DIR}/web/src/api.js
+    ${CMAKE_CURRENT_SOURCE_DIR}/web/src/style.css
+    ${CMAKE_CURRENT_SOURCE_DIR}/web/src/components/Pill.vue
+    ${CMAKE_CURRENT_SOURCE_DIR}/web/src/components/SettingField.vue
+    ${CMAKE_CURRENT_SOURCE_DIR}/web/src/components/Dashboard.vue
+    ${CMAKE_CURRENT_SOURCE_DIR}/web/src/components/ChannelsTab.vue
+    ${CMAKE_CURRENT_SOURCE_DIR}/web/src/components/CardTab.vue
+    ${CMAKE_CURRENT_SOURCE_DIR}/web/src/components/MxlTab.vue
+    ${CMAKE_CURRENT_SOURCE_DIR}/web/src/components/SettingsTab.vue
 )
 
 if(MXL_DECKLINK_USE_PREBUILT_WEBUI)
-    if(NOT EXISTS ${WEBUI_DIST})
-        message(FATAL_ERROR "MXL_DECKLINK_USE_PREBUILT_WEBUI=ON but ${WEBUI_DIST} is missing")
+    set(WEBUI_HTML ${CMAKE_CURRENT_SOURCE_DIR}/web/dist/index.html)
+    if(NOT EXISTS ${WEBUI_HTML})
+        message(FATAL_ERROR "MXL_DECKLINK_USE_PREBUILT_WEBUI=ON but ${WEBUI_HTML} is missing")
     endif()
-    set(WEBUI_HTML ${WEBUI_DIST})
     set(WEBUI_EMBED_COMMENT "Embedding prebuilt web/dist/index.html")
 else()
     find_program(NPM_EXECUTABLE npm REQUIRED)
+    # Build into the CMake binary dir so the source tree stays clean and the
+    # OUTPUT never collides with a DEPENDS path under web/.
+    set(WEBUI_HTML ${CMAKE_CURRENT_BINARY_DIR}/webui/index.html)
     add_custom_command(
-        OUTPUT ${WEBUI_DIST}
+        OUTPUT ${WEBUI_HTML}
         COMMAND ${NPM_EXECUTABLE} ci --no-fund --no-audit
         COMMAND ${NPM_EXECUTABLE} run build
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/webui
+        COMMAND ${CMAKE_COMMAND} -E copy
+            ${CMAKE_CURRENT_SOURCE_DIR}/web/dist/index.html ${WEBUI_HTML}
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/web
         DEPENDS ${WEBUI_SOURCES}
         COMMENT "Building Vue web UI (npm run build)"
         VERBATIM
     )
-    set(WEBUI_HTML ${WEBUI_DIST})
-    set(WEBUI_EMBED_COMMENT "Embedding web/dist/index.html")
+    set(WEBUI_EMBED_COMMENT "Embedding built web UI")
 endif()
 
 add_custom_command(
