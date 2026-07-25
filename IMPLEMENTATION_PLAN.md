@@ -176,3 +176,83 @@ The abstraction is intentionally thin (value types + 3 interfaces) so the hot pa
 
 Pre-go-live items from §9 (IP 100G enumeration, MXL handle thread-safety confirmation,
 empirical sizing) remain hardware tasks and are tracked in the README.
+
+---
+
+## 7. v1.2 — Configuration file, web control interface, domain management
+
+This section covers the spec v1.2 additions (§4.5, §7.5, §7.6).
+
+### 7.1 Design
+
+- **Layered configuration (`config/store`).** `ConfigStore` merges three layers —
+  built-in defaults, the `MXL_CONFIG_FILE` JSON file, the process environment —
+  into the existing `Config` via the existing `loadConfig(EnvReader)` validator
+  (the file is just another `EnvReader`, keyed by the same variable names, so
+  §4.3 validation applies unchanged to the merge). The store tracks per-key
+  provenance (default/file/env) for the UI, persists atomically
+  (temp + rename), and rejects any update whose merged result fails validation.
+  JSON parsing uses a vendored `picojson` (the same single-header parser MXL
+  itself uses).
+- **Dynamic channels.** `ChannelManager` gains `applyChannelConfigs(vector<ChannelConfig>)`:
+  it diffs against the running set by channel index (`ChannelConfig` equality),
+  stops removed/changed channels, and starts added/changed ones. Global config
+  stays immutable per process (§2.2); the API reports `restart_required` when a
+  global key changes in the file layer. Concurrency: apply runs under the
+  manager mutex on control-plane threads only; channel supervisors already
+  encapsulate safe stop/start.
+- **DeckLink status (`decklink`).** `ISubDevice::status()` returns a snapshot
+  struct (detected input mode, current input/output modes and pixel formats,
+  signal/reference lock, busy flags, PCIe width/speed, temperature) read from
+  `IDeckLinkStatus`; the mock synthesizes equivalent values. The SDK backend
+  additionally logs the loaded DeckLink API version (`IDeckLinkAPIInformation`)
+  at startup — the §5.1 field note's diagnosability requirement.
+- **Domain/flow discovery (`mxlbridge/domainscan`).** Filesystem scan per §7.6
+  (bounded-depth recursion; `domain_def.json` / `options.json` / `*.mxl-flow`
+  markers), flow listing from `{uuid}.mxl-flow/flow_def.json` plus
+  `mxlIsFlowActive` and reader-based runtime info, and domain creation
+  (mkdir + `domain_def.json` + optional `options.json`) with path-containment
+  and tmpfs checks. All of this uses public MXL API + documented on-disk
+  layout; creation is container-side because MXL v1.0.1 cannot create domains.
+- **Web server (`ops`).** The hand-rolled HTTP server gains request bodies
+  (POST/PUT with Content-Length) and serves on `WEB_PORT`: `/api/…` JSON
+  endpoints (§7.5.6) plus a single embedded HTML/JS page (no build toolchain,
+  no external assets; the file is embedded into the binary at build time via a
+  CMake hex-embed step). Tabs: Dashboard, Channels, Card, MXL, Settings.
+- **Status plumbing.** `channel::Status` additionally exposes the currently
+  active video mode; `/api/status` aggregates what `/statusz` reports today
+  plus card identity and config-provenance summary.
+
+### 7.2 Open questions and the assumptions taken
+
+Decisions taken to keep the work moving; all are cheap to change:
+
+1. **Authentication** — none built in (like `/metrics`); reverse proxy for
+   anything beyond an ops LAN. *Alternative would be basic auth via env; not
+   added to keep secrets out of the config surface.*
+2. **Port layout** — new `WEB_PORT` (8080) instead of reusing `HEALTH_PORT`,
+   so probes and UI can be firewalled independently; `WEB_ENABLE=false`
+   removes the surface.
+3. **Config file schema** — flat env-var-keyed JSON (not a nested schema).
+   Rationale in §4.5: one validator, trivial env↔file mapping for the UI's
+   env-var view, GitOps-diffable.
+4. **Apply semantics** — per-channel restart-on-change; global keys are
+   persist-only + `restart_required`. Live migration of global settings
+   (e.g. domain switch without restart) was deliberately excluded.
+5. **UI technology** — dependency-free vanilla JS single file embedded in the
+   binary, matching the project's zero-runtime-dependency stance. (The CBC
+   hands-on functions use React+FastAPI; adopting that here would add a node
+   toolchain and a Python runtime to a C++ container for no functional gain.)
+6. **Domain deletion** — not offered (destructive, cross-container blast
+   radius). Creation + discovery only.
+7. **Flow assignment scope** — video+audio flow selection for output channels;
+   ANC output insertion remains out of scope (as in v1.1).
+
+### 7.3 Verification additions
+
+Unit tests for the config store (layering, provenance, atomic persist,
+invalid-merge rejection), domain scanning/creation (temp dirs with marker
+files), and API JSON rendering. The integration smoke test gains a web-API
+scenario: GET status/config/domains/flows against the running mock-backend
+container, a PUT config change that live-restarts one channel, and a domain
+creation round-trip.
