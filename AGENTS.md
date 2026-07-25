@@ -2,13 +2,14 @@
 
 ## Cursor Cloud specific instructions
 
-`mxl-decklink` is a single C++20/CMake service (no package manager, no lockfiles).
-It bridges a Blackmagic DeckLink card and an MXL shared-memory domain, and exposes
-health (`/livez`, `/readyz`, `/statusz` on `HEALTH_PORT`, default 9080) and
-Prometheus metrics (`/metrics` on `METRICS_PORT`, default 9090). A built-in mock
-DeckLink backend (`MXL_DECKLINK_BACKEND=mock`) lets you build, test, and run the
-full pipeline with no hardware. Canonical build/run/test commands live in
-`README.md` ("Building", "Running", "Testing without hardware"), the CI workflow
+`mxl-decklink` is a single C++20/CMake service (Vue web UI under `web/`,
+built via npm at configure/build time). It bridges a Blackmagic DeckLink card
+and an MXL shared-memory domain, and exposes health (`/livez`, `/readyz`,
+`/statusz`), Prometheus metrics (`/metrics`), and the web UI/API on one
+consolidated `WEB_PORT` (default 8080). A built-in mock DeckLink backend
+(`MXL_DECKLINK_BACKEND=mock`) lets you build, test, and run the full pipeline
+with no hardware. Canonical build/run/test commands live in `README.md`
+("Building", "Running", "Testing without hardware"), the CI workflow
 `.github/workflows/ci.yaml`, and `tests/integration/smoke.sh`.
 
 ### Prebuilt toolchain (baked into the VM snapshot)

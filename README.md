@@ -26,17 +26,16 @@ MXL v1.0.1 API rather than the spec's paraphrase of it).
   reconnect; signal-loss standby + stream reset; auto format detection with
   flow replacement (new UUID) on format change; card-profile ownership with
   fail-fast (exit 2) on external profile changes.
-- **Ops**: `/livez`, `/readyz`, `/statusz` on `HEALTH_PORT` (default 9080),
-  Prometheus `/metrics` on `METRICS_PORT` (default 9090), structured JSON
-  logging.
-- **Web control interface** (spec §7.5): embedded single-file UI + REST API on
-  `WEB_PORT` (default 8080) — dashboard, per-channel configuration forms that
-  adapt to the matched card's sub-devices, live DeckLink SDK status (detected
-  input format, locks, PCIe, temperature), an MXL domain/flow browser with
-  flow→output assignment, and domain creation. Per-channel changes apply at
-  runtime (only the affected channel restarts); global changes are flagged
+- **Ops + web control** (spec §7.1 / §7.5): one consolidated HTTP port
+  `WEB_PORT` (default 8080) serves `/livez`, `/readyz`, `/statusz`, Prometheus
+  `/metrics`, and — when `WEB_ENABLE=true` — the embedded Vue SPA + REST API
+  (dashboard, per-channel forms that adapt to the matched card's sub-devices,
+  live DeckLink SDK status, MXL domain/flow browser with flow→output
+  assignment and domain creation; domain deletion is not supported).
+  Per-channel changes apply at runtime; global changes are flagged
   `restart_required`. Unauthenticated by design — keep it on protected
-  networks or set `WEB_ENABLE=false`.
+  networks or set `WEB_ENABLE=false` (health/metrics remain). Structured JSON
+  logging.
 - **Config**: environment variables, optionally layered over a JSON
   configuration file (`MXL_CONFIG_FILE`, spec §4.5) that the web interface
   persists to. Precedence: env > file > default; env-set keys are shown
@@ -46,7 +45,8 @@ MXL v1.0.1 API rather than the spec's paraphrase of it).
 
 ## Building
 
-Requirements: Linux, CMake ≥ 3.24, GCC ≥ 12 or Clang ≥ 16, and an installed
+Requirements: Linux, CMake ≥ 3.24, GCC ≥ 12 or Clang ≥ 16, Node.js ≥ 20
+(for the Vue web UI build), and an installed
 [MXL](https://github.com/dmf-mxl/mxl) v1.0.1 (`find_package(mxl)`).
 
 ```bash

@@ -51,8 +51,8 @@ TEST_CASE("minimal multi-channel config parses with defaults")
     CHECK(cfg.cardId == 0xa1b2c3d4);
     CHECK(cfg.domainPath == "/dev/shm/mxl");
     CHECK(cfg.timestampSource == config::TimestampSourceCfg::Hardware);
-    CHECK(cfg.healthPort == 9080);
-    CHECK(cfg.metricsPort == 9090);
+    CHECK(cfg.webPort == 8080);
+    CHECK(cfg.webEnable);
     CHECK(cfg.minHealthyChannels == 1);
     CHECK_FALSE(cfg.legacyMode);
 }
@@ -212,10 +212,14 @@ TEST_CASE("min healthy channels must not exceed channel count")
     CHECK_THROWS_AS(config::loadConfig(envOf(vars)), config::ConfigError);
 }
 
-TEST_CASE("health and metrics port collision is rejected")
+TEST_CASE("legacy HEALTH_PORT/METRICS_PORT are rejected (§7.1 consolidation)")
 {
     auto vars = minimalMultiChannel();
-    vars["HEALTH_PORT"] = "9090";
+    vars["HEALTH_PORT"] = "9080";
+    CHECK_THROWS_AS(config::loadConfig(envOf(vars)), config::ConfigError);
+
+    vars = minimalMultiChannel();
+    vars["METRICS_PORT"] = "9090";
     CHECK_THROWS_AS(config::loadConfig(envOf(vars)), config::ConfigError);
 }
 

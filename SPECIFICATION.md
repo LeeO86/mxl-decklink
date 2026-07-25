@@ -200,8 +200,8 @@ Multi-channel operation uses **indexed prefixes `CHx_…`** (x = 0..15), one pre
 | `MXL_REALTIME_PRIORITY` | Integer 1–99 | `50` | no | `SCHED_FIFO` priority for streaming threads. Requires `RT_SCHED=true`. |
 | `RT_SCHED` | bool | `false` | no | Enables `SCHED_FIFO` for streaming threads (requires `CAP_SYS_NICE`). |
 | `MXL_PTP_INTERFACE` | Interface name | — | no | Network interface for PTP status correlation (IP cards); informational for health/metrics. |
-| `HEALTH_PORT` | Port | `9080` | no | HTTP port for `/livez`, `/readyz`, `/statusz`. |
-| `METRICS_PORT` | Port | `9090` | no | HTTP port for `/metrics` (Prometheus). |
+| `WEB_ENABLE` | bool | `true` | no | Enables the embedded web interface and its mutating REST API (§7.5). Health endpoints and `/metrics` are always served. |
+| `WEB_PORT` | Port | `8080` | no | Consolidated HTTP port for the web UI, `/api/…`, `/livez` `/readyz` `/statusz`, and `/metrics` (§7.1). |
 | `MXL_HEALTH_MIN_HEALTHY_CHANNELS` | Integer | `1` | no | Readiness threshold; see §7.2. Set to the total configured channel count for strict "all channels up" semantics. |
 | `SIGNAL_LOSS_TIMEOUT_S` | Integer | `30` | no | Input channels: window without signal after which a stream reset cycle is triggered. |
 | `STARTUP_MAX_RETRIES` | Integer | `10` | no | Retry counter for card-level startup. |
@@ -210,8 +210,6 @@ Multi-channel operation uses **indexed prefixes `CHx_…`** (x = 0..15), one pre
 | `LOG_FORMAT` | enum | `json` | no | `json` (structured) or `text`. |
 | `DECKLINK_LIB_MODE` | enum | `bundled` | no | `bundled` (libDeckLinkAPI.so from image) or `hostmount` (bind-mounted from host); documentation of the chosen pattern, see §5.1. |
 | `MXL_CONFIG_FILE` | Filesystem path | — | no | Path of the JSON configuration file (§4.5). When set, the file supplies the file layer of the configuration; the web interface persists changes to it. Mounted as a config volume in container deployments. |
-| `WEB_ENABLE` | bool | `true` | no | Enables the embedded web interface and its REST API (§7.5). |
-| `WEB_PORT` | Port | `8080` | no | HTTP port for the web interface and `/api/…` endpoints. |
 | `MXL_DOMAIN_SCAN_PATH` | Filesystem path | `/dev/shm` | no | Root directory scanned for MXL domains (§7.6). Mount the whole host tmpfs (§5.2) to make sibling domains discoverable. |
 
 ### 4.2 Per-Channel Configuration (Prefix `CHx_`)
@@ -348,11 +346,15 @@ For redundant paths, create one Deployment per physical path (not `replicas: 2`)
 
 ### 7.1 Endpoints
 
-The container exposes three HTTP endpoints on `HEALTH_PORT` plus Prometheus text format on `METRICS_PORT`:
+The container exposes a **single consolidated HTTP port** `WEB_PORT` (default 8080). On that port:
 
 - **`/livez`** returns **200 OK** as long as the process is alive and the housekeeping thread has been active within the last 5 seconds. On deadlock or total failure it times out → Kubernetes kills the pod.
 - **`/readyz`** returns **200 OK** exactly when at least `MXL_HEALTH_MIN_HEALTHY_CHANNELS` channels are in state `healthy`. Below the threshold it returns **503 Service Unavailable** with a JSON body listing per-channel state. Default threshold is 1; for critical broadcast setups set it to the total configured channel count — "ready" then strictly means "all channels up".
 - **`/statusz`** always returns **200 OK** with a full JSON report: per channel its state, last frame timestamp, signal lock, frame drops, reconnect counter, MXL grain commit count.
+- **`/metrics`** serves Prometheus text format.
+- When `WEB_ENABLE=true` (default): the embedded web UI (`/`) and the `/api/…` REST API (§7.5). When `WEB_ENABLE=false`, UI and mutating API are absent; health and metrics remain.
+
+`HEALTH_PORT` / `METRICS_PORT` from earlier revisions are **removed**; setting them is a configuration error.
 
 Recommended probes: `livenessProbe` initialDelay 30 s, period 10 s, failureThreshold 3, timeout 3 s; `readinessProbe` initialDelay 5 s, period 2 s, failureThreshold 2.
 
@@ -374,7 +376,7 @@ Structured JSON logging with fields `ts`, `level`, `card_id`, `channel_index`, `
 
 ### 7.5 Web Control Interface
 
-The container embeds a web interface (single-page application served from the binary, no external assets) plus a JSON REST API on `WEB_PORT` (default 8080), enabled by `WEB_ENABLE` (default true). It is a **control plane for one container/card** — it does not replace NMOS or facility orchestration, and it carries no media data.
+The container embeds a web interface — a **Vue 3** single-page application built to one HTML file and embedded in the binary (no external assets at runtime) — plus a JSON REST API on the same `WEB_PORT` as health and metrics (§7.1), gated by `WEB_ENABLE` (default true). It is a **control plane for one container/card** — it does not replace NMOS or facility orchestration, and it carries no media data.
 
 #### 7.5.1 Structure
 
@@ -383,7 +385,7 @@ The UI is organized in tabs:
 - **Dashboard (index)** — general status: card identity, per-channel state/direction/mode/flow with live counters (frames, drops, reconnects, grain rate), MXL domain in use, process health (uptime, version, MXL SDK version, DeckLink API version when available).
 - **Channels** — the full per-channel configuration (§4.2) as forms. The tab **adapts dynamically to the matched card**: it offers exactly the sub-devices the card exposes (2 for a Duo 2, 8 for a Quad 2 / IP 100G, …) with their capture/playback capabilities, and allows adding, editing, and removing channels within those bounds. For output channels, the video/audio flows can be picked directly from the MXL browser (§7.5.4).
 - **Card** — everything the DeckLink SDK reports per sub-device: detected input video mode (`bmdDeckLinkStatusDetectedVideoInputMode`), current input/output modes and pixel formats, input-signal and reference lock, busy state, PCIe link width/speed, device temperature, profile information.
-- **MXL** — domain and flow browser (§7.6): all domains under `MXL_DOMAIN_SCAN_PATH`, all flows of a selected domain with their descriptors and liveness, plus domain creation.
+- **MXL** — domain and flow browser (§7.6): all domains under `MXL_DOMAIN_SCAN_PATH`, all flows of a selected domain with their descriptors and liveness, plus domain creation. Domain **deletion is not supported** (remove unused domains on the host); the UI states this explicitly.
 - **Settings** — the global (card-wide) configuration and the **environment-variable view**: the effective configuration rendered as a copyable `KEY=value` block for operators who want to persist the current setup as environment variables instead of the config file.
 
 #### 7.5.2 Configuration editing rules
@@ -402,7 +404,7 @@ The MXL tab allows selecting any **video flow** (and matching audio flow) discov
 
 #### 7.5.5 Security
 
-The web interface implements **no authentication** — like the health and metrics endpoints it is intended for protected operations networks. Deployments exposing it beyond that must front it with an authenticating reverse proxy / ingress. All state-changing endpoints reject requests when `WEB_ENABLE=false` (the server is not started at all). The API never returns environment-variable **values** of settings that look like credentials (none exist in the current schema, but the rule is future-proofing).
+The web interface implements **no authentication** — like the health and metrics endpoints it is intended for protected operations networks. Deployments exposing it beyond that must front it with an authenticating reverse proxy / ingress. When `WEB_ENABLE=false`, the UI and mutating `/api/…` routes are not registered (health and metrics stay on `WEB_PORT`). The API never returns environment-variable **values** of settings that look like credentials (none exist in the current schema, but the rule is future-proofing).
 
 #### 7.5.6 REST API (consumed by the UI, usable for automation)
 
@@ -420,7 +422,7 @@ The web interface implements **no authentication** — like the health and metri
 
 - **Domain scan.** A directory under `MXL_DOMAIN_SCAN_PATH` (recursive, bounded depth) is recognized as an MXL domain when it contains a `domain_def.json` marker (the convention established by the CBC/Radio-Canada `mxl-hands-on` ecosystem: `{id, label, description}`), an MXL `options.json`, or at least one `*.mxl-flow` entry. The scan reports path, label/description/id when available, tmpfs backing (via `mxlIsTmpFs`), flow count, and whether it is the domain this container currently uses.
 - **Flow listing.** Flows are enumerated from the domain's `{uuid}.mxl-flow/` directories; each entry reports the flow ID, the parsed `flow_def.json` descriptor (format, media type, label, group hint, geometry/rate or channel count), **liveness** (`mxlIsFlowActive`), and — for discrete flows — the current head index and last write time from the flow's runtime info.
-- **Domain creation.** MXL v1.0.1 deliberately only *opens* existing domain directories (`mxlCreateInstance` fails on a missing directory). Creating a domain is therefore a container-side filesystem operation exposed via `POST /api/domains`: create the directory (must lie under `MXL_DOMAIN_SCAN_PATH`; must be tmpfs-backed or the response carries a warning), write `domain_def.json` (generated `id`, user-supplied `label`/`description`) for ecosystem discoverability, and optionally write `options.json` with a user-supplied history duration (`urn:x-mxl:option:history_duration/v1.0`). Switching the container to the new domain is a global configuration change (`MXL_DOMAIN_PATH`, `restart_required` per §7.5.3).
+- **Domain creation.** MXL v1.0.1 deliberately only *opens* existing domain directories (`mxlCreateInstance` fails on a missing directory). Creating a domain is therefore a container-side filesystem operation exposed via `POST /api/domains`: create the directory (must lie under `MXL_DOMAIN_SCAN_PATH`; must be tmpfs-backed or the response carries a warning), write `domain_def.json` (generated `id`, user-supplied `label`/`description`) for ecosystem discoverability, and optionally write `options.json` with a user-supplied history duration (`urn:x-mxl:option:history_duration/v1.0`). Switching the container to the new domain is a global configuration change (`MXL_DOMAIN_PATH`, `restart_required` per §7.5.3). **Domain deletion is intentionally not offered** — operators remove unused domain directories on the host.
 
 ---
 ## 8. Non-Functional Requirements
@@ -459,7 +461,7 @@ The web interface implements **no authentication** — like the health and metri
 
 **Partial live reload — implemented via the web interface (v1.2).** Reconfiguring channel 3 without interrupting channels 1–2 no longer requires a pod restart: per-channel changes through the REST API/web interface (§7.5.3) stop and recreate only the affected channel. Global (card-wide) settings still require a process restart, which the API flags as `restart_required`.
 
-**Web interface exposure.** The embedded web interface (§7.5) is unauthenticated by design (operations-network assumption, like `/metrics`). Exposing `WEB_PORT` beyond a protected network without an authenticating reverse proxy is a deployment error. `WEB_ENABLE=false` removes the surface entirely for fixed installations.
+**Web interface exposure.** The embedded web interface (§7.5) is unauthenticated by design (operations-network assumption, like `/metrics`). Exposing `WEB_PORT` beyond a protected network without an authenticating reverse proxy is a deployment error. `WEB_ENABLE=false` removes the UI and mutating API while leaving health and metrics on the same port.
 
 **Multi-node sharing (roadmap).** The MXL Fabrics API (RDMA, libfabric-based) is not part of v1.0. Multi-node deployments must wait or evaluate a sidecar proxy (e.g. `jonasohland/mxl-fabrics-proxy`). Outside container scope, but relevant to deployment architecture.
 

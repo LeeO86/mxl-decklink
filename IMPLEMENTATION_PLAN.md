@@ -215,10 +215,10 @@ This section covers the spec v1.2 additions (§4.5, §7.5, §7.6).
   and tmpfs checks. All of this uses public MXL API + documented on-disk
   layout; creation is container-side because MXL v1.0.1 cannot create domains.
 - **Web server (`ops`).** The hand-rolled HTTP server gains request bodies
-  (POST/PUT with Content-Length) and serves on `WEB_PORT`: `/api/…` JSON
-  endpoints (§7.5.6) plus a single embedded HTML/JS page (no build toolchain,
-  no external assets; the file is embedded into the binary at build time via a
-  CMake hex-embed step). Tabs: Dashboard, Channels, Card, MXL, Settings.
+  (POST/PUT with Content-Length) and serves on a **single** `WEB_PORT`: health
+  endpoints, `/metrics`, `/api/…` JSON (§7.5.6), and an embedded Vue 3 SPA
+  (built with Vite + `vite-plugin-singlefile` to one HTML file, then hex-embedded
+  into the binary via CMake). Tabs: Dashboard, Channels, Card, MXL, Settings.
 - **Status plumbing.** `channel::Status` additionally exposes the currently
   active video mode; `/api/status` aggregates what `/statusz` reports today
   plus card identity and config-provenance summary.
@@ -230,23 +230,24 @@ Decisions taken to keep the work moving; all are cheap to change:
 1. **Authentication** — none built in (like `/metrics`); reverse proxy for
    anything beyond an ops LAN. *Alternative would be basic auth via env; not
    added to keep secrets out of the config surface.*
-2. **Port layout** — new `WEB_PORT` (8080) instead of reusing `HEALTH_PORT`,
-   so probes and UI can be firewalled independently; `WEB_ENABLE=false`
-   removes the surface.
+2. **Port layout** — one consolidated `WEB_PORT` (8080) for health, metrics,
+   UI, and API. `WEB_ENABLE=false` removes only the UI and mutating API.
 3. **Config file schema** — flat env-var-keyed JSON (not a nested schema).
    Rationale in §4.5: one validator, trivial env↔file mapping for the UI's
    env-var view, GitOps-diffable.
 4. **Apply semantics** — per-channel restart-on-change; global keys are
    persist-only + `restart_required`. Live migration of global settings
    (e.g. domain switch without restart) was deliberately excluded.
-5. **UI technology** — dependency-free vanilla JS single file embedded in the
-   binary, matching the project's zero-runtime-dependency stance. (The CBC
-   hands-on functions use React+FastAPI; adopting that here would add a node
-   toolchain and a Python runtime to a C++ container for no functional gain.)
+5. **UI technology** — Vue 3 + Vite, multi-stage Docker (Node build → C++
+   embed). Runtime still ships zero Node/Python deps; the SPA is one embedded
+   HTML file.
 6. **Domain deletion** — not offered (destructive, cross-container blast
-   radius). Creation + discovery only.
+   radius). Creation + discovery only; the MXL tab mentions this in the UI.
 7. **Flow assignment scope** — video+audio flow selection for output channels;
    ANC output insertion remains out of scope (as in v1.1).
+8. **Bundled Desktop Video** — optional via `DESKTOPVIDEO_DEB_URL` build-arg /
+   CI secret; Blackmagic packages are not freely downloadable, so the default
+   image uses hostmount.
 
 ### 7.3 Verification additions
 

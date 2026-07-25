@@ -2,12 +2,11 @@
 # Integration smoke test: runs the full binary with the mock DeckLink backend
 # against a real MXL domain in tmpfs (IMPLEMENTATION_PLAN.md §6.2).
 #
-# Usage: tests/integration/smoke.sh [path-to-mxl-decklink] 
+# Usage: tests/integration/smoke.sh [path-to-mxl-decklink]
 set -u -o pipefail
 
 BIN="${1:-build/mxl-decklink}"
-HEALTH_PORT="${HEALTH_PORT_OVERRIDE:-19080}"
-METRICS_PORT="${METRICS_PORT_OVERRIDE:-19090}"
+WEB_PORT="${WEB_PORT_OVERRIDE:-19080}"
 
 FAILURES=0
 PID=""
@@ -46,8 +45,7 @@ common_env() {
         MXL_DECKLINK_BACKEND=mock \
         MXL_DECKLINK_CARD_ID=0xa1b2c3d4 \
         MXL_DOMAIN_PATH="$DOMAIN" \
-        HEALTH_PORT="$HEALTH_PORT" \
-        METRICS_PORT="$METRICS_PORT" \
+        WEB_PORT="$WEB_PORT" \
         LOG_LEVEL=info \
         CH0_DIRECTION=input \
         CH0_SUBDEVICE_INDEX=0 \
@@ -69,7 +67,7 @@ common_env() {
 }
 
 http_code() {
-    curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:$HEALTH_PORT$1" 2>/dev/null
+    curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:$WEB_PORT$1" 2>/dev/null
 }
 
 wait_for_readyz() {
@@ -82,7 +80,7 @@ wait_for_readyz() {
 }
 
 statusz_field() {
-    curl -s --max-time 3 "http://127.0.0.1:$HEALTH_PORT/statusz" |
+    curl -s --max-time 3 "http://127.0.0.1:$WEB_PORT/statusz" |
         python3 -c "
 import json, sys
 data = json.load(sys.stdin)
@@ -150,7 +148,7 @@ for flow in 5fbec3b1-1b0f-417d-9059-8b94a47197ed b3bb5be7-9fe9-4324-a5bb-4c70e10
     [[ -e "$DOMAIN/$flow.mxl-flow" || -d "$DOMAIN/$flow" ]] || fail "flow $flow not materialized in domain"
 done
 
-metrics=$(curl -s --max-time 3 "http://127.0.0.1:$METRICS_PORT/metrics")
+metrics=$(curl -s --max-time 3 "http://127.0.0.1:$WEB_PORT/metrics")
 echo "$metrics" | grep -q 'mxl_decklink_frames_total{.*channel_label="smoke-in".*}' || fail "frames_total metric missing"
 echo "$metrics" | grep -q 'mxl_grains_committed_total' || fail "grains_committed metric missing"
 echo "$metrics" | grep -q 'mxl_flow_grain_commit_latency_seconds_bucket' || fail "commit latency histogram missing"
@@ -232,7 +230,7 @@ fc_env() {
     exec env -i \
         PATH="$PATH" LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" \
         MXL_DECKLINK_BACKEND=mock MXL_DECKLINK_CARD_ID=0xa1b2c3d4 \
-        MXL_DOMAIN_PATH="$DOMAIN" HEALTH_PORT="$HEALTH_PORT" METRICS_PORT="$METRICS_PORT" \
+        MXL_DOMAIN_PATH="$DOMAIN" WEB_PORT="$WEB_PORT" \
         MOCK_FORMAT_CHANGE_AFTER_FRAMES=100 MOCK_FORMAT_CHANGE_MODE=HD720p50 \
         CH0_DIRECTION=input CH0_SUBDEVICE_INDEX=0 CH0_VIDEO_MODE=auto \
         CH0_AUDIO_CHANNEL_COUNT=2 \
@@ -279,7 +277,6 @@ WEBDOMAIN="$SCANROOT/main"
 mkdir -p "$WEBDOMAIN"
 printf '{"urn:x-mxl:option:history_duration/v1.0": 100000000}' > "$WEBDOMAIN/options.json"
 CONFDIR=$(mktemp -d /tmp/mxl-smoke-conf.XXXXXX)
-WEB_PORT=$(( HEALTH_PORT + 1000 ))
 LOG4="/tmp/mxl-smoke-web-$$.log"
 web_env() {
     exec env -i \
@@ -287,7 +284,7 @@ web_env() {
         MXL_DECKLINK_BACKEND=mock MXL_DECKLINK_CARD_ID=0xa1b2c3d4 \
         MXL_DOMAIN_PATH="$WEBDOMAIN" MXL_DOMAIN_SCAN_PATH="$SCANROOT" \
         MXL_CONFIG_FILE="$CONFDIR/config.json" \
-        HEALTH_PORT="$HEALTH_PORT" METRICS_PORT="$METRICS_PORT" WEB_PORT="$WEB_PORT" \
+        WEB_PORT="$WEB_PORT" \
         CH0_DIRECTION=input CH0_SUBDEVICE_INDEX=0 CH0_VIDEO_MODE=HD720p50 \
         CH0_AUDIO_CHANNEL_COUNT=2 \
         CH0_MXL_VIDEO_FLOW_ID=5fbec3b1-1b0f-417d-9059-8b94a47197ed \
@@ -301,8 +298,12 @@ wait_for_readyz 30 || fail "web run: /readyz did not reach 200"
 
 webapi() { curl -s --max-time 5 "http://127.0.0.1:$WEB_PORT$1"; }
 
-# UI page and status endpoint.
+# UI page and status endpoint (same port as health/metrics).
 webapi / | grep -q "mxl-decklink" || fail "web UI index page not served"
+# Health and metrics share WEB_PORT.
+[[ "$(http_code /livez)" == "200" ]] || fail "/livez not on WEB_PORT"
+curl -s --max-time 3 "http://127.0.0.1:$WEB_PORT/metrics" | grep -q mxl_decklink_frames_total \
+    || fail "/metrics not on WEB_PORT"
 state=$(webapi /api/status | python3 -c "import json,sys; print(json.load(sys.stdin)['channels'][0]['state'])") || state=err
 [[ "$state" == "healthy" ]] || fail "web /api/status channel state: $state"
 

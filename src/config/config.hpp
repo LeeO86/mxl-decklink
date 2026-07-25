@@ -117,8 +117,9 @@ namespace mxldl::config
         int realtimePriority = 50;
         bool rtSched = false;
         std::optional<std::string> ptpInterface;
-        int healthPort = 9080;
-        int metricsPort = 9090;
+        // One consolidated HTTP port (§7.1): web UI + REST API + health
+        // endpoints + Prometheus metrics. WEB_ENABLE only gates the UI and
+        // the mutating API; health/metrics are always served.
         bool webEnable = true;
         int webPort = 8080;
         std::optional<std::string> configFile; // §4.5

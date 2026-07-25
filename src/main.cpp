@@ -152,9 +152,17 @@ int main()
         mxldl::channel::ChannelManager channels(cfg, *card, *domain, metrics);
 
         mxldl::ops::HealthService health(cfg, channels, metrics);
+
+        mxldl::ops::Housekeeping housekeeping(cfg, channels, *domain, health, metrics);
+        housekeeping.start();
+        channels.startAll();
+
+        // §7.1/§7.5: the consolidated HTTP server (health + metrics always;
+        // UI + API gated by WEB_ENABLE inside the service).
+        mxldl::ops::WebService web(cfg, *store, channels, *card, *domain, health);
         try
         {
-            health.start();
+            web.start();
         }
         catch (std::exception const& e)
         {
@@ -162,31 +170,10 @@ int main()
             return kExitTempFail;
         }
 
-        mxldl::ops::Housekeeping housekeeping(cfg, channels, *domain, health, metrics);
-        housekeeping.start();
-        channels.startAll();
-
-        // §7.5: web control interface.
-        std::unique_ptr<mxldl::ops::WebService> web;
-        if (cfg.webEnable)
-        {
-            web = std::make_unique<mxldl::ops::WebService>(cfg, *store, channels, *card, *domain);
-            try
-            {
-                web->start();
-            }
-            catch (std::exception const& e)
-            {
-                mxldl::log::error("web_server_failed", {{"details", e.what()}});
-                return kExitTempFail;
-            }
-        }
-
         mxldl::log::info("running",
             {
-                {"health_port", cfg.healthPort},
-                {"metrics_port", cfg.metricsPort},
-                {"web_port", cfg.webEnable ? std::to_string(cfg.webPort) : "disabled"},
+                {"port", cfg.webPort},
+                {"web_ui", cfg.webEnable},
             });
 
         // Main wait loop.
@@ -224,12 +211,8 @@ int main()
 
         channels.stopAll(); // steps 1–4: stop streams, flush, disable, release writers/readers
         mxldl::log::debug("shutdown_stage", {{"stage", "channels_stopped"}});
-        if (web)
-        {
-            web->stop();
-        }
+        web.stop();
         housekeeping.stop();
-        health.stop();
         mxldl::log::debug("shutdown_stage", {{"stage", "ops_stopped"}});
         domain.reset(); // step 5: mxlDestroyInstance
         mxldl::log::debug("shutdown_stage", {{"stage", "mxl_destroyed"}});

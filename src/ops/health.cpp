@@ -14,65 +14,14 @@ namespace mxldl::ops
         heartbeat();
     }
 
-    void HealthService::start()
-    {
-        _healthServer = std::make_unique<HttpServer>(
-            _cfg.healthPort,
-            [this](HttpRequest const& req) {
-                return handleHealth(req.path);
-            },
-            "http-health");
-        _metricsServer = std::make_unique<HttpServer>(
-            _cfg.metricsPort,
-            [this](HttpRequest const& req) {
-                return handleMetrics(req.path);
-            },
-            "http-metrics");
-        _healthServer->start();
-        _metricsServer->start();
-    }
-
-    void HealthService::stop()
-    {
-        if (_healthServer)
-        {
-            _healthServer->stop();
-        }
-        if (_metricsServer)
-        {
-            _metricsServer->stop();
-        }
-    }
-
     void HealthService::heartbeat()
     {
         _lastHeartbeatTai.store(util::taiNowNs());
     }
 
-    HttpResponse HealthService::handleHealth(std::string const& path)
+    HttpResponse HealthService::metricsText()
     {
-        if (path == "/livez")
-        {
-            return livez();
-        }
-        if (path == "/readyz")
-        {
-            return readyz();
-        }
-        if (path == "/statusz")
-        {
-            return statusz();
-        }
-        return {404, "text/plain; charset=utf-8", "not found; endpoints: /livez /readyz /statusz\n"};
-    }
-
-    HttpResponse HealthService::handleMetrics(std::string const& path)
-    {
-        if (path == "/metrics")
-        {
-            return {200, "text/plain; version=0.0.4; charset=utf-8", _metrics.render()};
-        }
-        return {404, "text/plain; charset=utf-8", "not found; endpoint: /metrics\n"};
+        return {200, "text/plain; version=0.0.4; charset=utf-8", _metrics.render()};
     }
 
     HttpResponse HealthService::livez()

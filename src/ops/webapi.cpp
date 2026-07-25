@@ -45,12 +45,13 @@ namespace mxldl::ops
     }
 
     WebService::WebService(config::Config const& activeCfg, config::ConfigStore& store, channel::ChannelManager& channels, dl::ICard& card,
-        mxlbridge::Domain& domain)
+        mxlbridge::Domain& domain, HealthService& health)
         : _activeCfg(activeCfg)
         , _store(store)
         , _channels(channels)
         , _card(card)
         , _domain(domain)
+        , _health(health)
         , _startedAtTaiNs(util::taiNowNs())
     {}
 
@@ -77,6 +78,29 @@ namespace mxldl::ops
     {
         try
         {
+            // Always served (§7.1): probes and metrics.
+            if (req.path == "/livez")
+            {
+                return _health.livez();
+            }
+            if (req.path == "/readyz")
+            {
+                return _health.readyz();
+            }
+            if (req.path == "/statusz")
+            {
+                return _health.statusz();
+            }
+            if (req.path == "/metrics")
+            {
+                return _health.metricsText();
+            }
+
+            // UI + API only with WEB_ENABLE=true (§7.5.5).
+            if (!_activeCfg.webEnable)
+            {
+                return jsonError(404, "web interface disabled (WEB_ENABLE=false); available endpoints: /livez /readyz /statusz /metrics");
+            }
             if (req.path == "/" || req.path == "/index.html")
             {
                 return {200, "text/html; charset=utf-8", std::string(webui::indexHtml())};

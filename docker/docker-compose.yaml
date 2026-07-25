@@ -40,9 +40,9 @@ services:
       - SYS_NICE
       - IPC_LOCK
     ports:
-      - "9080:9080" # /livez /readyz /statusz
-      - "9090:9090" # /metrics
-      - "8080:8080" # web control interface (§7.5) — protected networks only!
+      # Consolidated HTTP port (§7.1): web UI, /api, /livez /readyz /statusz, /metrics.
+      # Protected operations networks only — the UI is unauthenticated (§7.5.5).
+      - "8080:8080"
     environment:
       DECKLINK_LIB_MODE: hostmount # see the libDeckLinkAPI.so mount above
       MXL_CONFIG_FILE: /config/mxl-decklink.json # §4.5 file layer (web UI persistence)
@@ -75,7 +75,7 @@ services:
       CH1_MXL_AUDIO_FLOW_ID: 9126cc2f-4c26-4c9b-a6cd-93c4381c9be5
       CH1_LABEL: studio-a-pgm-out
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:9080/readyz"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/readyz"]
       interval: 5s
       timeout: 3s
       start_period: 30s
