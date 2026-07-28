@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import {
   NIL_UUID,
   afKey,
@@ -22,7 +22,7 @@ const error = ref("");
 const createMsg = ref({ kind: "", text: "" });
 const createForm = ref({ path: "", label: "", description: "", history_ms: "" });
 
-const assignOpen = ref(false);
+const assignDlg = ref(null);
 const assignFlow = ref(null);
 const assignChannel = ref("");
 const assignAudio = ref("");
@@ -80,7 +80,7 @@ async function createDomain() {
   }
 }
 
-function openAssign(flow) {
+async function openAssign(flow) {
   assignFlow.value = flow;
   const cfg = config.value;
   const outputs = channelIndices(cfg).filter((i) => valueOf(cfg, chKey(i, "DIRECTION")) === "output");
@@ -95,7 +95,17 @@ function openAssign(flow) {
   assignHint.value = mode
     ? { kind: "ok", text: `Video mode will be set to ${mode}.` }
     : { kind: "err", text: "WARNING: no DeckLink video mode matches this flow's geometry — assignment will keep the channel's current mode and may fail." };
-  assignOpen.value = true;
+  await nextTick();
+  if (assignDlg.value && !assignDlg.value.open) assignDlg.value.showModal();
+}
+
+function closeAssign() {
+  if (assignDlg.value?.open) assignDlg.value.close();
+  else onAssignDialogClose();
+}
+
+function onAssignDialogClose() {
+  assignFlow.value = null;
 }
 
 async function confirmAssign() {
@@ -124,7 +134,7 @@ async function confirmAssign() {
   }
   if (assignMode.value) set[chKey(idx, "VIDEO_MODE")] = assignMode.value;
   const res = await api.put("/api/config", { set, unset: [] });
-  assignOpen.value = false;
+  closeAssign();
   if (res.error) alert(res.error);
   else {
     await load();
@@ -257,31 +267,40 @@ onUnmounted(() => clearInterval(timer));
       <div v-if="createMsg.text" class="msg" :class="createMsg.kind">{{ createMsg.text }}</div>
     </div>
 
-    <dialog :open="assignOpen" @close="assignOpen = false">
-      <form style="padding:1rem" @submit.prevent="confirmAssign">
-        <h3 style="margin-top:0">Assign flow to output</h3>
-        <div v-if="assignFlow" class="muted" style="font-size:.8rem">
-          Video flow {{ assignFlow.id }} —
-          {{ assignFlow.width }}×{{ assignFlow.height }}{{ assignFlow.interlaced ? "i" : "p" }}
-          {{ fmtRate(assignFlow.rate_numerator, assignFlow.rate_denominator) }}
-        </div>
-        <label>Output channel</label>
-        <select v-model="assignChannel">
-          <option v-for="o in outputOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
-        </select>
-        <label>Audio flow (optional)</label>
-        <select v-model="assignAudio">
-          <option value="">(none / keep current)</option>
-          <option v-for="f in audioOptions" :key="f.id" :value="f.id">
-            {{ f.label || f.id.slice(0, 13) }} ({{ f.channel_count }} ch)
-          </option>
-        </select>
-        <div class="msg" :class="assignHint.kind">{{ assignHint.text }}</div>
-        <div class="actions">
-          <button type="button" class="btn secondary" @click="assignOpen = false">Cancel</button>
-          <button type="submit" class="btn" :disabled="!assignChannel">Assign</button>
-        </div>
-      </form>
-    </dialog>
+    <Teleport to="body">
+      <dialog ref="assignDlg" class="assign-dialog" @close="onAssignDialogClose">
+        <form style="padding:1rem" @submit.prevent="confirmAssign">
+          <h3 style="margin-top:0">Assign flow to output</h3>
+          <div v-if="assignFlow" class="muted" style="font-size:.8rem">
+            Video flow {{ assignFlow.id }} —
+            {{ assignFlow.width }}×{{ assignFlow.height }}{{ assignFlow.interlaced ? "i" : "p" }}
+            {{ fmtRate(assignFlow.rate_numerator, assignFlow.rate_denominator) }}
+          </div>
+          <label>Output channel</label>
+          <select v-model="assignChannel">
+            <option v-for="o in outputOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
+          </select>
+          <label>Audio flow (optional)</label>
+          <select v-model="assignAudio">
+            <option value="">(none / keep current)</option>
+            <option v-for="f in audioOptions" :key="f.id" :value="f.id">
+              {{ f.label || f.id.slice(0, 13) }} ({{ f.channel_count }} ch)
+            </option>
+          </select>
+          <div class="msg" :class="assignHint.kind">{{ assignHint.text }}</div>
+          <div class="actions">
+            <button type="button" class="btn secondary" @click="closeAssign">Cancel</button>
+            <button type="submit" class="btn" :disabled="!assignChannel">Assign</button>
+          </div>
+        </form>
+      </dialog>
+    </Teleport>
   </template>
 </template>
+
+<style scoped>
+.assign-dialog {
+  margin: auto;
+  padding: 0;
+}
+</style>
