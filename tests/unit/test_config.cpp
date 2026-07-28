@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include <map>
 #include <string>
+#include <vector>
 
 #include <doctest/doctest.h>
 
@@ -29,7 +30,9 @@ namespace
             {"CH0_DIRECTION", "input"},
             {"CH0_SUBDEVICE_INDEX", "0"},
             {"CH0_MXL_VIDEO_FLOW_ID", "5fbec3b1-1b0f-417d-9059-8b94a47197ed"},
-            {"CH0_MXL_AUDIO_FLOW_ID", "b3bb5be7-9fe9-4324-a5bb-4c70e1084449"},
+            {"CH0_AF0_FLOW_ID", "b3bb5be7-9fe9-4324-a5bb-4c70e1084449"},
+            {"CH0_AF0_CHANNEL_COUNT", "2"},
+            {"CH0_AF0_MAP", "0,1"},
         };
     }
 }
@@ -46,6 +49,10 @@ TEST_CASE("minimal multi-channel config parses with defaults")
     CHECK(ch.audioEnable);
     CHECK(ch.audioChannelCount == 16);
     CHECK(ch.audioSampleType == config::AudioSampleType::Int32);
+    REQUIRE(ch.audioFlows.size() == 1);
+    CHECK(ch.audioFlows[0].index == 0);
+    CHECK(ch.audioFlows[0].channelCount == 2);
+    CHECK(ch.audioFlows[0].deckLinkChannels == std::vector<int>({0, 1}));
     CHECK(ch.label == "ch0");
     CHECK(ch.groupHint == "ch0");
     CHECK(cfg.cardId == 0xa1b2c3d4);
@@ -64,7 +71,9 @@ TEST_CASE("channel index gaps are allowed (§4)")
     vars["CH3_SUBDEVICE_INDEX"] = "1";
     vars["CH3_VIDEO_MODE"] = "HD1080p50";
     vars["CH3_MXL_VIDEO_FLOW_ID"] = "0e635152-e501-4d4e-bb87-9f3fe05eb79a";
-    vars["CH3_MXL_AUDIO_FLOW_ID"] = "9126cc2f-4c26-4c9b-a6cd-93c4381c9be5";
+    vars["CH3_AF0_FLOW_ID"] = "9126cc2f-4c26-4c9b-a6cd-93c4381c9be5";
+    vars["CH3_AF0_CHANNEL_COUNT"] = "2";
+    vars["CH3_AF0_MAP"] = "0,1";
     auto const cfg = config::loadConfig(envOf(vars));
     REQUIRE(cfg.channels.size() == 2);
     CHECK(cfg.channels[0].index == 0);
@@ -120,11 +129,50 @@ TEST_CASE("RGB pixel formats are rejected (§3.3)")
 TEST_CASE("audio flow id required when audio enabled")
 {
     auto vars = minimalMultiChannel();
-    vars.erase("CH0_MXL_AUDIO_FLOW_ID");
+    vars.erase("CH0_AF0_FLOW_ID");
+    vars.erase("CH0_AF0_CHANNEL_COUNT");
+    vars.erase("CH0_AF0_MAP");
     CHECK_THROWS_AS(config::loadConfig(envOf(vars)), config::ConfigError);
     vars["CH0_AUDIO_ENABLE"] = "false";
     auto const cfg = config::loadConfig(envOf(vars));
     CHECK_FALSE(cfg.channels[0].audioEnable);
+}
+
+TEST_CASE("legacy MXL_AUDIO_FLOW_ID is rejected")
+{
+    auto vars = minimalMultiChannel();
+    vars["CH0_MXL_AUDIO_FLOW_ID"] = "b3bb5be7-9fe9-4324-a5bb-4c70e1084449";
+    CHECK_THROWS_AS(config::loadConfig(envOf(vars)), config::ConfigError);
+}
+
+TEST_CASE("audio matrix map length must match channel count; output forbids mixing")
+{
+    auto vars = minimalMultiChannel();
+    vars["CH0_AF0_CHANNEL_COUNT"] = "2";
+    vars["CH0_AF0_MAP"] = "0";
+    CHECK_THROWS_AS(config::loadConfig(envOf(vars)), config::ConfigError);
+
+    vars = minimalMultiChannel();
+    vars["CH0_DIRECTION"] = "output";
+    vars["CH0_VIDEO_MODE"] = "HD1080p50";
+    vars["CH0_AF0_CHANNEL_COUNT"] = "2";
+    vars["CH0_AF0_MAP"] = "0,1";
+    vars["CH0_AF1_FLOW_ID"] = "9126cc2f-4c26-4c9b-a6cd-93c4381c9be5";
+    vars["CH0_AF1_CHANNEL_COUNT"] = "2";
+    vars["CH0_AF1_MAP"] = "1,2"; // DeckLink ch 1 overlaps AF0
+    CHECK_THROWS_AS(config::loadConfig(envOf(vars)), config::ConfigError);
+}
+
+TEST_CASE("input rejects nil audio flow UUID; output allows it")
+{
+    auto vars = minimalMultiChannel();
+    vars["CH0_AF0_FLOW_ID"] = "00000000-0000-0000-0000-000000000000";
+    CHECK_THROWS_AS(config::loadConfig(envOf(vars)), config::ConfigError);
+
+    vars["CH0_DIRECTION"] = "output";
+    vars["CH0_VIDEO_MODE"] = "HD1080p50";
+    auto const cfg = config::loadConfig(envOf(vars));
+    CHECK(cfg.channels[0].audioFlows[0].flowId.isNil());
 }
 
 TEST_CASE("anc flow id required when anc enabled")
@@ -143,7 +191,9 @@ TEST_CASE("duplicate flow UUIDs are rejected (§4.3)")
     vars["CH1_DIRECTION"] = "input";
     vars["CH1_SUBDEVICE_INDEX"] = "1";
     vars["CH1_MXL_VIDEO_FLOW_ID"] = vars["CH0_MXL_VIDEO_FLOW_ID"];
-    vars["CH1_MXL_AUDIO_FLOW_ID"] = "169feb2c-3fae-42a5-ae2e-f6f8cbce29cf";
+    vars["CH1_AF0_FLOW_ID"] = "169feb2c-3fae-42a5-ae2e-f6f8cbce29cf";
+    vars["CH1_AF0_CHANNEL_COUNT"] = "2";
+    vars["CH1_AF0_MAP"] = "0,1";
     CHECK_THROWS_AS(config::loadConfig(envOf(vars)), config::ConfigError);
 
     // Loopback (an output channel reading a flow produced by an input
@@ -160,7 +210,9 @@ TEST_CASE("same sub-device twice per direction is rejected, but in+out is allowe
     vars["CH1_DIRECTION"] = "input";
     vars["CH1_SUBDEVICE_INDEX"] = "0";
     vars["CH1_MXL_VIDEO_FLOW_ID"] = "0e635152-e501-4d4e-bb87-9f3fe05eb79a";
-    vars["CH1_MXL_AUDIO_FLOW_ID"] = "169feb2c-3fae-42a5-ae2e-f6f8cbce29cf";
+    vars["CH1_AF0_FLOW_ID"] = "169feb2c-3fae-42a5-ae2e-f6f8cbce29cf";
+    vars["CH1_AF0_CHANNEL_COUNT"] = "2";
+    vars["CH1_AF0_MAP"] = "0,1";
     CHECK_THROWS_AS(config::loadConfig(envOf(vars)), config::ConfigError);
 
     // Bidirectional sub-device: one input + one output on the same index.
@@ -184,7 +236,9 @@ TEST_CASE("legacy v1.0 variables map to implicit channel 0 (§4.4)")
         {"DIRECTION", "input"},
         {"VIDEO_MODE", "HD1080p50"},
         {"MXL_VIDEO_FLOW_ID", "5fbec3b1-1b0f-417d-9059-8b94a47197ed"},
-        {"MXL_AUDIO_FLOW_ID", "b3bb5be7-9fe9-4324-a5bb-4c70e1084449"},
+        {"AF0_FLOW_ID", "b3bb5be7-9fe9-4324-a5bb-4c70e1084449"},
+        {"AF0_CHANNEL_COUNT", "2"},
+        {"AF0_MAP", "0,1"},
         {"AUDIO_CHANNEL_COUNT", "8"},
     };
     auto const cfg = config::loadConfig(envOf(vars));

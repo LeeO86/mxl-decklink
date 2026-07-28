@@ -1,6 +1,17 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
-import { api, chKey, channelIndices, channelMeta, fmtRate, modeNameForFlow, valueOf } from "../api.js";
+import {
+  NIL_UUID,
+  afKey,
+  api,
+  chKey,
+  channelIndices,
+  channelMeta,
+  fmtRate,
+  identityMap,
+  modeNameForFlow,
+  valueOf,
+} from "../api.js";
 import Pill from "./Pill.vue";
 
 const domains = ref(null);
@@ -98,8 +109,19 @@ async function confirmAssign() {
     set[chKey(idx, "SUBDEVICE_INDEX")] = "0";
   }
   set[chKey(idx, "MXL_VIDEO_FLOW_ID")] = flow.id;
-  if (assignAudio.value) set[chKey(idx, "MXL_AUDIO_FLOW_ID")] = assignAudio.value;
-  else if (!valueOf(cfg, chKey(idx, "MXL_AUDIO_FLOW_ID"))) set[chKey(idx, "AUDIO_ENABLE")] = "false";
+  if (assignAudio.value) {
+    const audioFlow = audioOptions.value.find((f) => f.id === assignAudio.value);
+    const chCount = Number(audioFlow?.channel_count) || 2;
+    set[afKey(idx, 0, "FLOW_ID")] = assignAudio.value;
+    set[afKey(idx, 0, "CHANNEL_COUNT")] = String(chCount);
+    set[afKey(idx, 0, "MAP")] = identityMap(chCount);
+    if (!valueOf(cfg, afKey(idx, 0, "LABEL"))) {
+      set[afKey(idx, 0, "LABEL")] = audioFlow?.label || `ch${idx}-audio1`;
+    }
+    set[chKey(idx, "AUDIO_ENABLE")] = "true";
+  } else if (!valueOf(cfg, afKey(idx, 0, "FLOW_ID")) || valueOf(cfg, afKey(idx, 0, "FLOW_ID")) === NIL_UUID) {
+    set[chKey(idx, "AUDIO_ENABLE")] = "false";
+  }
   if (assignMode.value) set[chKey(idx, "VIDEO_MODE")] = assignMode.value;
   const res = await api.put("/api/config", { set, unset: [] });
   assignOpen.value = false;

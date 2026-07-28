@@ -240,7 +240,10 @@ namespace mxldl::ops
                 out << ",";
             }
             first = false;
-            out << "{\"key\":" << jstr(meta.key) << ",\"kind\":" << jstr(meta.kind == config::SettingKind::Global ? "global" : "channel")
+            out << "{\"key\":" << jstr(meta.key) << ",\"kind\":"
+                << jstr(meta.kind == config::SettingKind::Global       ? "global"
+                          : meta.kind == config::SettingKind::AudioFlow ? "audio_flow"
+                                                                        : "channel")
                 << ",\"type\":" << jstr(meta.type) << ",\"default\":" << jstr(meta.defaultValue) << ",\"help\":" << jstr(meta.help)
                 << ",\"requires_restart\":" << (meta.requiresRestart ? "true" : "false") << ",\"options\":[";
             for (std::size_t i = 0; i < meta.options.size(); ++i)

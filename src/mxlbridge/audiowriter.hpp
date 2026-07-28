@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstdint>
+#include <span>
 #include <string>
 
 #include <mxl/flow.h>
@@ -25,12 +26,10 @@ namespace mxldl::mxlbridge
         AudioWriter& operator=(AudioWriter const&) = delete;
 
         /// Converts one interleaved integer PCM packet to deinterleaved
-        /// float32 and commits it so that the batch ENDS at sample index
-        /// `endIndex` (MXL sample-range convention: `count` samples up to
-        /// `index`). `endIndex` is derived from the packet's TAI timestamp:
-        ///   endIndex = mxlTimestampToIndex(48000/1, taiOfFirstSample) + frames
+        /// float32 using `channelMap` (MXL ch ← DeckLink ch) and commits it
+        /// so that the batch ENDS at sample index `endIndex`.
         mxlStatus writeSamples(std::uint64_t endIndex, void const* interleavedPcm, std::size_t sampleFrames, std::size_t deckLinkChannels,
-            config::AudioSampleType sampleType);
+            std::span<int const> channelMap, config::AudioSampleType sampleType);
 
         [[nodiscard]] mxlRational sampleRate() const
         {

@@ -76,8 +76,12 @@ spec:
               value: auto
             - name: CH0_MXL_VIDEO_FLOW_ID
               value: 5fbec3b1-1b0f-417d-9059-8b94a47197ed
-            - name: CH0_MXL_AUDIO_FLOW_ID
+            - name: CH0_AF0_FLOW_ID
               value: b3bb5be7-9fe9-4324-a5bb-4c70e1084449
+            - name: CH0_AF0_CHANNEL_COUNT
+              value: "2"
+            - name: CH0_AF0_MAP
+              value: "0,1"
             - name: CH0_LABEL
               value: ingest-1
             - name: CH1_DIRECTION
@@ -88,8 +92,12 @@ spec:
               value: HD1080p50
             - name: CH1_MXL_VIDEO_FLOW_ID
               value: 0e635152-e501-4d4e-bb87-9f3fe05eb79a
-            - name: CH1_MXL_AUDIO_FLOW_ID
+            - name: CH1_AF0_FLOW_ID
               value: 9126cc2f-4c26-4c9b-a6cd-93c4381c9be5
+            - name: CH1_AF0_CHANNEL_COUNT
+              value: "2"
+            - name: CH1_AF0_MAP
+              value: "0,1"
             - name: CH1_LABEL
               value: playout-1
           ports:

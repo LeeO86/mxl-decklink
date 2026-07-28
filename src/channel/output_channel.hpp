@@ -45,6 +45,12 @@ namespace mxldl::channel
         void housekeeping();
 
     private:
+        struct AudioFlowReader
+        {
+            config::AudioFlowConfig cfg;
+            std::unique_ptr<mxlbridge::AudioReader> reader; // null when flow UUID is nil
+        };
+
         void supervisorLoop();
         bool bringUp();
         void tearDownStreaming();
@@ -62,7 +68,7 @@ namespace mxldl::channel
         Status _status;
         std::unique_ptr<dl::IPlaybackSession> _playback;
         std::unique_ptr<mxlbridge::VideoReader> _videoReader;
-        std::unique_ptr<mxlbridge::AudioReader> _audioReader;
+        std::vector<AudioFlowReader> _audioFlows;
 
         config::VideoMode _mode{};
         std::atomic<bool> _playing{false};

@@ -4,7 +4,7 @@
 import { computed } from "vue";
 
 const props = defineProps({
-  meta: { type: Object, required: true }, // schema entry
+  meta: { type: Object, default: null }, // schema entry
   displayKey: { type: String, required: true }, // full key, e.g. CH0_DIRECTION
   value: { type: String, default: "" },
   source: { type: String, default: "default" }, // default/file/env
@@ -15,26 +15,28 @@ const props = defineProps({
 const model = defineModel({ type: String, default: "" });
 
 const disabled = computed(() => props.source === "env" || !props.editable);
+const fieldKey = computed(() => props.meta?.key || props.displayKey.split("_").pop());
 const isSelect = computed(
-  () => props.meta.type === "enum" || props.meta.type === "bool" || props.meta.key === "SUBDEVICE_INDEX"
+  () => props.meta && (props.meta.type === "enum" || props.meta.type === "bool" || props.meta.key === "SUBDEVICE_INDEX")
 );
 const options = computed(() => {
+  if (!props.meta) return [];
   if (props.meta.key === "SUBDEVICE_INDEX") {
     return [...Array(props.subdeviceCount || 8).keys()].map((i) => ({ value: String(i), label: `sub-device ${i}` }));
   }
   const opts = props.meta.type === "bool" ? ["true", "false"] : props.meta.options;
   return opts.map((o) => ({ value: o, label: o }));
 });
-const unsetLabel = computed(() => (props.meta.default ? `(default: ${props.meta.default})` : "(unset)"));
+const unsetLabel = computed(() => (props.meta?.default ? `(default: ${props.meta.default})` : "(unset)"));
 </script>
 
 <template>
   <div>
-    <label :title="meta.help">
-      {{ meta.key }}
+    <label :title="meta?.help || ''">
+      {{ fieldKey }}
       <span v-if="source === 'env'" class="envbadge" title="Set via environment variable — unset it to edit here">ENV</span>
       <span v-else-if="source === 'file'" class="envbadge filebadge" title="From the configuration file">FILE</span>
-      <span v-if="meta.requires_restart && meta.kind === 'global'" class="envbadge" title="Applies on next container start">RESTART</span>
+      <span v-if="meta?.requires_restart && meta?.kind === 'global'" class="envbadge" title="Applies on next container start">RESTART</span>
     </label>
     <select v-if="isSelect" v-model="model" :disabled="disabled">
       <option v-if="!required" value="">{{ unsetLabel }}</option>

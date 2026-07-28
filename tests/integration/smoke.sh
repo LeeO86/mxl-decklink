@@ -53,7 +53,9 @@ common_env() {
         CH0_AUDIO_CHANNEL_COUNT=2 \
         CH0_VIDEO_ANC_ENABLE=true \
         CH0_MXL_VIDEO_FLOW_ID=5fbec3b1-1b0f-417d-9059-8b94a47197ed \
-        CH0_MXL_AUDIO_FLOW_ID=b3bb5be7-9fe9-4324-a5bb-4c70e1084449 \
+        CH0_AF0_FLOW_ID=b3bb5be7-9fe9-4324-a5bb-4c70e1084449 \
+        CH0_AF0_CHANNEL_COUNT=2 \
+        CH0_AF0_MAP=0,1 \
         CH0_MXL_ANC_FLOW_ID=db3bd465-2772-484f-8fac-830b0471258b \
         CH0_LABEL=smoke-in \
         CH1_DIRECTION=output \
@@ -61,7 +63,9 @@ common_env() {
         CH1_VIDEO_MODE=HD720p50 \
         CH1_AUDIO_CHANNEL_COUNT=2 \
         CH1_MXL_VIDEO_FLOW_ID=5fbec3b1-1b0f-417d-9059-8b94a47197ed \
-        CH1_MXL_AUDIO_FLOW_ID=b3bb5be7-9fe9-4324-a5bb-4c70e1084449 \
+        CH1_AF0_FLOW_ID=b3bb5be7-9fe9-4324-a5bb-4c70e1084449 \
+        CH1_AF0_CHANNEL_COUNT=2 \
+        CH1_AF0_MAP=0,1 \
         CH1_LABEL=smoke-out \
         "$@"
 }
@@ -235,7 +239,9 @@ fc_env() {
         CH0_DIRECTION=input CH0_SUBDEVICE_INDEX=0 CH0_VIDEO_MODE=auto \
         CH0_AUDIO_CHANNEL_COUNT=2 \
         CH0_MXL_VIDEO_FLOW_ID=5fbec3b1-1b0f-417d-9059-8b94a47197ed \
-        CH0_MXL_AUDIO_FLOW_ID=b3bb5be7-9fe9-4324-a5bb-4c70e1084449 \
+        CH0_AF0_FLOW_ID=b3bb5be7-9fe9-4324-a5bb-4c70e1084449 \
+        CH0_AF0_CHANNEL_COUNT=2 \
+        CH0_AF0_MAP=0,1 \
         CH0_LABEL=smoke-fc \
         "$BIN"
 }
@@ -288,7 +294,9 @@ web_env() {
         CH0_DIRECTION=input CH0_SUBDEVICE_INDEX=0 CH0_VIDEO_MODE=HD720p50 \
         CH0_AUDIO_CHANNEL_COUNT=2 \
         CH0_MXL_VIDEO_FLOW_ID=5fbec3b1-1b0f-417d-9059-8b94a47197ed \
-        CH0_MXL_AUDIO_FLOW_ID=b3bb5be7-9fe9-4324-a5bb-4c70e1084449 \
+        CH0_AF0_FLOW_ID=b3bb5be7-9fe9-4324-a5bb-4c70e1084449 \
+        CH0_AF0_CHANNEL_COUNT=2 \
+        CH0_AF0_MAP=0,1 \
         CH0_LABEL=smoke-web-in \
         "$BIN"
 }
@@ -328,7 +336,7 @@ curl -s --max-time 5 -X POST "http://127.0.0.1:$WEB_PORT/api/domains" \
 curl -s --max-time 5 -X PUT "http://127.0.0.1:$WEB_PORT/api/config" -d '{
     "set": {"CH1_DIRECTION":"output","CH1_SUBDEVICE_INDEX":"0","CH1_VIDEO_MODE":"HD720p50",
             "CH1_AUDIO_CHANNEL_COUNT":"2","CH1_MXL_VIDEO_FLOW_ID":"5fbec3b1-1b0f-417d-9059-8b94a47197ed",
-            "CH1_MXL_AUDIO_FLOW_ID":"b3bb5be7-9fe9-4324-a5bb-4c70e1084449","CH1_LABEL":"smoke-web-out"}}' \
+            "CH1_AF0_FLOW_ID":"b3bb5be7-9fe9-4324-a5bb-4c70e1084449","CH1_AF0_CHANNEL_COUNT":"2","CH1_AF0_MAP":"0,1","CH1_LABEL":"smoke-web-out"}}' \
     | grep -q '"channels_added":\[1\]' || fail "live channel add via /api/config failed"
 sleep 3
 out_state=$(webapi /api/status | python3 -c "

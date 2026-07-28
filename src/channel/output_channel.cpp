@@ -170,10 +170,31 @@ namespace mxldl::channel
 
             // §2.4: reader handles first; producers may not be up yet — the
             // supervisor retries with backoff (§3.7).
-            _videoReader = std::make_unique<mxlbridge::VideoReader>(_domain, _cfg.videoFlowId.toString());
-            if (_cfg.audioEnable && _cfg.audioFlowId)
+            if (_cfg.videoFlowId.isNil())
             {
-                _audioReader = std::make_unique<mxlbridge::AudioReader>(_domain, _cfg.audioFlowId->toString());
+                log::warn("output_video_unassigned",
+                    {
+                        {"channel_index", _cfg.index},
+                        {"details", "MXL_VIDEO_FLOW_ID is the nil UUID — assign a flow before the channel can start"},
+                    });
+                return false;
+            }
+            _videoReader = std::make_unique<mxlbridge::VideoReader>(_domain, _cfg.videoFlowId.toString());
+            _audioFlows.clear();
+            if (_cfg.audioEnable)
+            {
+                _audioFlows.reserve(_cfg.audioFlows.size());
+                for (auto const& afCfg : _cfg.audioFlows)
+                {
+                    AudioFlowReader slot;
+                    slot.cfg = afCfg;
+                    if (!afCfg.flowId.isNil())
+                    {
+                        slot.reader = std::make_unique<mxlbridge::AudioReader>(_domain, afCfg.flowId.toString());
+                    }
+                    // Nil UUID = unassigned: mapped DeckLink channels stay silent.
+                    _audioFlows.push_back(std::move(slot));
+                }
             }
 
             _playback = _subDevice.openPlayback();
@@ -223,7 +244,7 @@ namespace mxldl::channel
                 _scheduledFrames = 0;
                 _recentLateOrDropped = 0;
                 _recentWindowStart = util::taiNowNs();
-                if (_audioReader)
+                if (!_audioFlows.empty())
                 {
                     _nextAudioEndIndex = _nextGrainIndex * _samplesPerFrame;
                 }
@@ -248,7 +269,7 @@ namespace mxldl::channel
                 }
             }
 
-            if (_cfg.audioEnable && _audioReader)
+            if (_cfg.audioEnable && !_audioFlows.empty())
             {
                 if (auto const err = _playback->beginAudioPreroll())
                 {
@@ -299,7 +320,7 @@ namespace mxldl::channel
             _playback.reset();
         }
         _videoReader.reset();
-        _audioReader.reset();
+        _audioFlows.clear();
     }
 
     bool OutputChannel::scheduleGrain(std::uint64_t grainIndex)
@@ -403,26 +424,52 @@ namespace mxldl::channel
 
     void OutputChannel::onRenderAudio(bool /*preroll*/)
     {
-        if (!_audioReader || !_playback)
+        if (_audioFlows.empty() || !_playback)
         {
             return;
         }
         std::lock_guard const lock{_scheduleMutex};
         _nextAudioEndIndex += _samplesPerFrame;
-        _audioScratch.resize(_samplesPerFrame * static_cast<std::size_t>(_cfg.audioChannelCount) *
-                             (_cfg.audioSampleType == config::AudioSampleType::Int32 ? 4 : 2));
+        auto const deckChannels = static_cast<std::size_t>(_cfg.audioChannelCount);
+        auto const bytesPerSample = _cfg.audioSampleType == config::AudioSampleType::Int32 ? 4u : 2u;
+        _audioScratch.assign(_samplesPerFrame * deckChannels * bytesPerSample, 0); // silence for unmapped / nil flows
         auto const timeoutNs = static_cast<std::uint64_t>(_cfg.readerTimeoutMs) * 1'000'000ULL;
-        auto const status = _audioReader->readSamples(_nextAudioEndIndex, _samplesPerFrame, timeoutNs, _audioScratch.data(),
-            static_cast<std::size_t>(_cfg.audioChannelCount), _cfg.audioSampleType);
-        if (status == MXL_STATUS_OK)
+
+        bool anyOk = false;
+        bool tooEarly = false;
+        for (auto& af : _audioFlows)
+        {
+            if (!af.reader)
+            {
+                continue; // nil UUID → leave mapped channels silent
+            }
+            auto const status = af.reader->readSamples(_nextAudioEndIndex, _samplesPerFrame, timeoutNs, _audioScratch.data(), deckChannels,
+                af.cfg.deckLinkChannels, _cfg.audioSampleType);
+            if (status == MXL_STATUS_OK)
+            {
+                anyOk = true;
+            }
+            else if (status == MXL_ERR_OUT_OF_RANGE_TOO_EARLY)
+            {
+                tooEarly = true;
+            }
+        }
+
+        if (anyOk)
         {
             _playback->scheduleAudio(_audioScratch.data(), static_cast<std::uint32_t>(_samplesPerFrame));
         }
-        else if (status == MXL_ERR_OUT_OF_RANGE_TOO_EARLY)
+        else if (tooEarly)
         {
             // Producer not there yet; skip this cycle and resync the index to
             // the video grain grid on the next successful video grain.
             _nextAudioEndIndex -= _samplesPerFrame;
+        }
+        else
+        {
+            // All assigned readers failed (or only nil slots): still schedule
+            // silence so DeckLink audio clock stays filled.
+            _playback->scheduleAudio(_audioScratch.data(), static_cast<std::uint32_t>(_samplesPerFrame));
         }
     }
 

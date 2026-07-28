@@ -58,7 +58,9 @@ namespace
             {"CH0_DIRECTION", "input"},
             {"CH0_SUBDEVICE_INDEX", "0"},
             {"CH0_MXL_VIDEO_FLOW_ID", "5fbec3b1-1b0f-417d-9059-8b94a47197ed"},
-            {"CH0_MXL_AUDIO_FLOW_ID", "b3bb5be7-9fe9-4324-a5bb-4c70e1084449"},
+            {"CH0_AF0_FLOW_ID", "b3bb5be7-9fe9-4324-a5bb-4c70e1084449"},
+            {"CH0_AF0_CHANNEL_COUNT", "2"},
+            {"CH0_AF0_MAP", "0,1"},
         };
     }
 }
@@ -80,7 +82,9 @@ TEST_CASE("missing config file is not an error; store persists on update (§4.5)
         {"CH1_SUBDEVICE_INDEX", "1"},
         {"CH1_VIDEO_MODE", "HD1080p50"},
         {"CH1_MXL_VIDEO_FLOW_ID", "0e635152-e501-4d4e-bb87-9f3fe05eb79a"},
-        {"CH1_MXL_AUDIO_FLOW_ID", "9126cc2f-4c26-4c9b-a6cd-93c4381c9be5"},
+        {"CH1_AF0_FLOW_ID", "9126cc2f-4c26-4c9b-a6cd-93c4381c9be5"},
+        {"CH1_AF0_CHANNEL_COUNT", "2"},
+        {"CH1_AF0_MAP", "0,1"},
     });
     REQUIRE(std::holds_alternative<ConfigStore::UpdateResult>(result));
     auto const& updated = std::get<ConfigStore::UpdateResult>(result);
@@ -128,7 +132,9 @@ TEST_CASE("invalid merges are rejected atomically (§4.5)")
         {"CH2_DIRECTION", "input"},
         {"CH2_SUBDEVICE_INDEX", "2"},
         {"CH2_MXL_VIDEO_FLOW_ID", "5fbec3b1-1b0f-417d-9059-8b94a47197ed"},
-        {"CH2_MXL_AUDIO_FLOW_ID", "169feb2c-3fae-42a5-ae2e-f6f8cbce29cf"},
+        {"CH2_AF0_FLOW_ID", "169feb2c-3fae-42a5-ae2e-f6f8cbce29cf"},
+        {"CH2_AF0_CHANNEL_COUNT", "2"},
+        {"CH2_AF0_MAP", "0,1"},
     });
     REQUIRE(std::holds_alternative<std::string>(rejected));
     CHECK_FALSE(std::filesystem::exists(file)); // nothing persisted

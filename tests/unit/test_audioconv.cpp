@@ -108,3 +108,41 @@ TEST_CASE("interleave fills missing channels with silence")
     CHECK(dst[0] == 1073741824);
     CHECK(dst[1] == 0);
 }
+
+TEST_CASE("mapped deinterleave selects DeckLink channels by MAP")
+{
+    // 2 frames × 4 DeckLink channels; map flow ← {1, 3}
+    std::vector<std::int32_t> const src = {
+        0, 1073741824, 0, -1073741824, // frame 0
+        0, 2147483647, 0, 0, // frame 1
+    };
+    std::vector<float> storage(4, 99.0f);
+    mxlMutableWrappedMultiBufferSlice s{};
+    s.count = 2;
+    s.stride = 2 * sizeof(float);
+    s.base.fragments[0].pointer = storage.data();
+    s.base.fragments[0].size = 2 * sizeof(float);
+    int const map[] = {1, 3};
+    deinterleaveInt32ToFloatMapped(src.data(), 2, 4, map, s);
+    CHECK(storage[0] == doctest::Approx(0.5f));
+    CHECK(storage[1] == doctest::Approx(1.0f));
+    CHECK(storage[2] == doctest::Approx(-0.5f));
+    CHECK(storage[3] == doctest::Approx(0.0f));
+}
+
+TEST_CASE("mapped interleave writes into selected DeckLink channels")
+{
+    std::vector<float> storage = {0.5f, -0.5f}; // 1 frame × 2 flow ch
+    mxlWrappedMultiBufferSlice s{};
+    s.count = 2;
+    s.stride = sizeof(float);
+    s.base.fragments[0].pointer = storage.data();
+    s.base.fragments[0].size = sizeof(float);
+    std::vector<std::int32_t> dst(4, 7); // 1 frame × 4 DeckLink ch
+    int const map[] = {1, 3};
+    interleaveFloatToInt32Mapped(s, 1, map, 4, dst.data());
+    CHECK(dst[0] == 7); // untouched
+    CHECK(dst[1] == 1073741824);
+    CHECK(dst[2] == 7);
+    CHECK(dst[3] == -1073741824);
+}
