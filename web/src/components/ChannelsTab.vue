@@ -303,6 +303,20 @@ async function remove(idx) {
   else setTimeout(load, 500);
 }
 
+/** Drop unsaved edits: reload from config, or drop a not-yet-created panel. */
+function discard(idx) {
+  if (matrixOpenFor.value === idx) matrixOpenFor.value = null;
+  if (extraPanels.value.includes(idx)) {
+    extraPanels.value = extraPanels.value.filter((i) => i !== idx);
+    delete drafts[idx];
+    delete lastSuggest[idx];
+    delete messages[idx];
+    return;
+  }
+  initDraft(config.value, idx);
+  delete messages[idx];
+}
+
 function addChannel() {
   const indices = new Set([...channelIndices(config.value), ...extraPanels.value]);
   const freeIdx = [...Array(16).keys()].find((i) => !indices.has(i));
@@ -457,6 +471,12 @@ onMounted(load);
           :disabled="!config.file || anyEnv(idx)"
           @click="remove(idx)"
         >Remove</button>
+        <button
+          class="btn secondary"
+          type="button"
+          :disabled="!config.file"
+          @click="discard(idx)"
+        >Discard</button>
         <button class="btn" :disabled="!config.file" @click="save(idx, extraPanels.includes(idx))">
           {{ extraPanels.includes(idx) ? "Create" : "Save & apply" }}
         </button>
@@ -471,7 +491,6 @@ onMounted(load);
 
     <AudioMatrixModal
       v-if="matrixOpenFor !== null && drafts[matrixOpenFor]"
-      :open="matrixOpenFor !== null"
       :channel-index="matrixOpenFor"
       :direction="drafts[matrixOpenFor][chKey(matrixOpenFor, 'DIRECTION')] || 'input'"
       :deck-channel-count="Number(drafts[matrixOpenFor][chKey(matrixOpenFor, 'AUDIO_CHANNEL_COUNT')] || 16)"
