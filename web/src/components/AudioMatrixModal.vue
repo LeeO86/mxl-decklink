@@ -2,10 +2,9 @@
 // Visual DeckLink × audio-flow crosspoint editor. Writes CHx_AFn_MAP as an
 // ordered list (flow channel i ← DeckLink column). Output channels enforce
 // one source per DeckLink column (no mixing).
-import { computed } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 
 const props = defineProps({
-  open: { type: Boolean, default: false },
   channelIndex: { type: Number, required: true },
   direction: { type: String, default: "input" },
   deckChannelCount: { type: Number, default: 16 },
@@ -16,6 +15,7 @@ const props = defineProps({
 
 const emit = defineEmits(["close", "apply"]);
 
+const dlg = ref(null);
 const isOutput = computed(() => props.direction === "output");
 
 /** Safe integer length for Array(...) — clamps NaN/floats/negatives. */
@@ -125,63 +125,82 @@ function pick(row, dl) {
 }
 
 function close() {
+  if (dlg.value?.open) dlg.value.close();
+  else emit("close");
+}
+
+function onDialogClose() {
   emit("close");
 }
+
+async function openModal() {
+  await nextTick();
+  if (dlg.value && !dlg.value.open) dlg.value.showModal();
+}
+
+onMounted(openModal);
+onBeforeUnmount(() => {
+  if (dlg.value?.open) dlg.value.close();
+});
 </script>
 
 <template>
-  <dialog :open="open" class="matrix-dialog" style="max-width:min(960px,96vw);width:96vw" @close="close">
-    <form style="padding:1rem" @submit.prevent>
-      <h3 style="margin-top:0">Audio routing matrix — CH{{ channelIndex }}</h3>
-      <p class="note">
-        Rows are MXL flow channels; columns are DeckLink interleaved channels.
-        Click a cell to route. Unmapped DeckLink columns stay silence.
-        <template v-if="isOutput"> Outputs: each DeckLink column may feed at most one flow channel (no mixing).</template>
-        <template v-else> Inputs: the same DeckLink column may fan out to multiple flows.</template>
-      </p>
-      <div class="matrix-scroll">
-        <table class="matrix-table">
-          <thead>
-            <tr>
-              <th>Flow</th>
-              <th v-for="dl in deckCols" :key="dl">DL{{ dl }}</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-if="!rows.length">
-              <td :colspan="deckCols.length + 1" class="muted">no audio flows</td>
-            </tr>
-            <tr v-for="(row, ri) in rows" :key="ri">
-              <th scope="row">
-                <span class="flow-tag">AF{{ row.flowIndex }}</span>
-                <span class="muted">.{{ row.flowChannel }}</span>
-                <div class="muted" style="font-weight:400;font-size:.7rem">{{ row.flowLabel }}</div>
-              </th>
-              <td
-                v-for="dl in deckCols"
-                :key="dl"
-                class="matrix-cell"
-                :class="cellClass(row, dl)"
-                :title="`AF${row.flowIndex} ch${row.flowChannel} ← DeckLink ${dl}`"
-                @click="pick(row, dl)"
-              >
-                <span v-if="row.selected === dl">●</span>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <div class="actions">
-        <button type="button" class="btn secondary" @click="close">Close</button>
-      </div>
-    </form>
-  </dialog>
+  <Teleport to="body">
+    <dialog ref="dlg" class="matrix-dialog" @close="onDialogClose">
+      <form style="padding:1rem" @submit.prevent>
+        <h3 style="margin-top:0">Audio routing matrix — CH{{ channelIndex }}</h3>
+        <p class="note">
+          Rows are MXL flow channels; columns are DeckLink interleaved channels.
+          Click a cell to route. Unmapped DeckLink columns stay silence.
+          <template v-if="isOutput"> Outputs: each DeckLink column may feed at most one flow channel (no mixing).</template>
+          <template v-else> Inputs: the same DeckLink column may fan out to multiple flows.</template>
+        </p>
+        <div class="matrix-scroll">
+          <table class="matrix-table">
+            <thead>
+              <tr>
+                <th>Flow</th>
+                <th v-for="dl in deckCols" :key="dl">DL{{ dl }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-if="!rows.length">
+                <td :colspan="deckCols.length + 1" class="muted">no audio flows</td>
+              </tr>
+              <tr v-for="(row, ri) in rows" :key="ri">
+                <th scope="row">
+                  <span class="flow-tag">AF{{ row.flowIndex }}</span>
+                  <span class="muted">.{{ row.flowChannel }}</span>
+                  <div class="muted" style="font-weight:400;font-size:.7rem">{{ row.flowLabel }}</div>
+                </th>
+                <td
+                  v-for="dl in deckCols"
+                  :key="dl"
+                  class="matrix-cell"
+                  :class="cellClass(row, dl)"
+                  :title="`AF${row.flowIndex} ch${row.flowChannel} ← DeckLink ${dl}`"
+                  @click="pick(row, dl)"
+                >
+                  <span v-if="row.selected === dl">●</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="actions">
+          <button type="button" class="btn secondary" @click="close">Close</button>
+        </div>
+      </form>
+    </dialog>
+  </Teleport>
 </template>
 
 <style scoped>
 .matrix-dialog {
   max-width: min(960px, 96vw);
   width: 96vw;
+  margin: auto;
+  padding: 0;
 }
 .matrix-scroll {
   overflow: auto;
