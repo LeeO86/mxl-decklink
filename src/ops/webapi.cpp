@@ -238,6 +238,7 @@ namespace mxldl::ops
         auto const dlVersion = dl::deckLinkApiVersion();
         out << ",\"decklink_api_version\":" << (dlVersion.empty() ? "null" : jstr(dlVersion));
         out << ",\"backend\":" << jstr(_activeCfg.backend);
+        out << ",\"card_open_fallback\":" << (_activeCfg.cardOpenFallback ? "true" : "false");
         out << ",\"uptime_s\":" << (util::taiNowNs() - _startedAtTaiNs) / 1'000'000'000ULL;
         out << ",\"restart_required\":" << (_restartRequired.load() ? "true" : "false");
 

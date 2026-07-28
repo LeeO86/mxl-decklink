@@ -147,6 +147,10 @@ namespace mxldl::config
         // Testing facility (documented in README, not in the spec): "sdk" or "mock".
         std::string backend = "sdk";
 
+        /// Set at runtime when the process fell back to the mock card because
+        /// the real DeckLink open failed and no channels were configured yet.
+        bool cardOpenFallback = false;
+
         std::vector<ChannelConfig> channels;
 
         /// True when the configuration was assembled from legacy v1.0

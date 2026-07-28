@@ -64,6 +64,9 @@ onUnmounted(() => {
   <div class="restart-banner" v-if="status?.restart_required">
     Global configuration changed — restart the container to apply.
   </div>
+  <div class="restart-banner" v-if="status?.card_open_fallback">
+    No DeckLink card opened — running the mock card so the UI stays reachable. Set a card selector and restart before enabling live channels.
+  </div>
   <nav>
     <button
       v-for="t in tabs"

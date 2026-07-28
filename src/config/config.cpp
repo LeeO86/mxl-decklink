@@ -677,7 +677,9 @@ namespace mxldl::config
         int const selectors = (cfg.cardId ? 1 : 0) + (cfg.cardName ? 1 : 0) + (cfg.cardIndex ? 1 : 0);
         if (selectors == 0)
         {
-            fail("one of MXL_DECKLINK_CARD_ID, MXL_DECKLINK_CARD_NAME, MXL_DECKLINK_CARD_INDEX is required");
+            // First-deploy default: enumerate card index 0 so the process (and
+            // web UI) can start with no card selector env vars.
+            cfg.cardIndex = 0;
         }
         if (selectors > 1)
         {
@@ -828,17 +830,13 @@ namespace mxldl::config
             cfg.backend = *v;
         }
 
-        // Channels.
+        // Channels — empty is allowed (configure via the web UI / config file).
         if (legacyMode)
         {
             cfg.channels.push_back(parseLegacyChannel(env));
         }
         else
         {
-            if (channelIndices.empty())
-            {
-                fail("no channels configured: set CHx_DIRECTION for at least one channel (or use the legacy v1.0 variables)");
-            }
             for (int const idx : channelIndices)
             {
                 cfg.channels.push_back(parseChannel(env, idx, "CH" + std::to_string(idx) + "_"));
@@ -849,8 +847,16 @@ namespace mxldl::config
 
         if (cfg.minHealthyChannels > static_cast<int>(cfg.channels.size()))
         {
-            fail("MXL_HEALTH_MIN_HEALTHY_CHANNELS (" + std::to_string(cfg.minHealthyChannels) + ") exceeds the number of configured channels (" +
-                 std::to_string(cfg.channels.size()) + ")");
+            if (cfg.channels.empty())
+            {
+                // No channels yet → readiness does not wait on healthy streams.
+                cfg.minHealthyChannels = 0;
+            }
+            else
+            {
+                fail("MXL_HEALTH_MIN_HEALTHY_CHANNELS (" + std::to_string(cfg.minHealthyChannels) +
+                     ") exceeds the number of configured channels (" + std::to_string(cfg.channels.size()) + ")");
+            }
         }
 
         return cfg;
