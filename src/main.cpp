@@ -123,21 +123,51 @@ int main()
 
         // §3.10 steps 3–4: enumeration, card match, profile.
         auto card = openCardWithRetry(cfg, env);
+        bool cardDegraded = false;
         if (!card)
         {
             if (g_signalReceived.load() != 0)
             {
                 return kExitOk;
             }
-            mxldl::log::error("card_open_gave_up", {{"details", "startup retries exhausted (EX_TEMPFAIL)"}});
-            return kExitTempFail;
+            // First-deploy / no-hardware path: keep the web UI reachable so
+            // operators can finish configuration. Prefer the mock card when
+            // no channels are active yet; otherwise fail as before.
+            if (cfg.channels.empty() && cfg.webEnable)
+            {
+                mxldl::log::warn("card_open_fallback_mock",
+                    {
+                        {"details",
+                            "DeckLink card open failed after retries; starting with the mock backend so the web UI stays reachable. "
+                            "Set MXL_DECKLINK_CARD_ID (or fix the device) and restart before enabling channels in production."},
+                    });
+                auto mockEnv = env;
+                auto mockCfg = cfg;
+                mockCfg.backend = "mock";
+                mockCfg.cardId.reset();
+                mockCfg.cardName.reset();
+                mockCfg.cardIndex = 0;
+                auto result = mxldl::dl::openConfiguredCard(mockCfg, mockEnv);
+                if (std::holds_alternative<std::unique_ptr<mxldl::dl::ICard>>(result))
+                {
+                    card = std::move(std::get<std::unique_ptr<mxldl::dl::ICard>>(result));
+                    cardDegraded = true;
+                    cfg.cardOpenFallback = true;
+                    cfg.backend = "mock";
+                }
+            }
+            if (!card)
+            {
+                mxldl::log::error("card_open_gave_up", {{"details", "startup retries exhausted (EX_TEMPFAIL)"}});
+                return kExitTempFail;
+            }
         }
 
         card->setCallbacks({.onExternalProfileChange = [] {
             g_externalProfileChange.store(true);
         }});
 
-        if (cfg.cardProfile)
+        if (cfg.cardProfile && !cardDegraded)
         {
             if (auto const err = card->applyProfile(*cfg.cardProfile))
             {

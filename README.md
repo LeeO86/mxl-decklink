@@ -134,6 +134,25 @@ CH0_AF0_CHANNEL_COUNT=2 \
 CH0_AF0_MAP=0,1 \
 ./build/mxl-decklink
 ```
+
+### First deploy (empty config)
+
+No card selector and no `CHx_*` variables are required to bring the process up.
+Defaults: `MXL_DECKLINK_CARD_INDEX=0`, `MXL_DOMAIN_PATH=/dev/shm/mxl` (created if
+missing), zero channels, readiness threshold clamped to 0. Mount a config volume
+and open the web UI to add channels:
+
+```bash
+# Absolutely minimal — UI on :8080, configure everything there
+MXL_CONFIG_FILE=/config/mxl-decklink.json \
+MXL_DECKLINK_BACKEND=mock \
+./build/mxl-decklink
+```
+
+On real hardware, omit `MXL_DECKLINK_BACKEND` (or set `sdk`). If the card is not
+yet visible, the process still starts the UI with a mock-card fallback when no
+channels are configured; set `MXL_DECKLINK_CARD_ID` and restart before going live.
+
 The full variable reference is SPECIFICATION.md §4 (global) and §4.2
 (per-channel `CHx_*`, including the `CHx_AFn_*` audio routing matrix). Docker Compose and Kubernetes examples live in
 [`docker/docker-compose.yaml`](docker/docker-compose.yaml),
@@ -142,9 +161,10 @@ The full variable reference is SPECIFICATION.md §4 (global) and §4.2
 
 Then open the web interface at `http://<host>:8080/` for interactive setup:
 mount a config volume and set `MXL_CONFIG_FILE=/config/mxl-decklink.json` so
-changes persist. The process runs as UID 1000 and must be able to create/rewrite
-that file — fix ownership once with a throwaway container (do **not** run the
-service as root just to chown):
+changes persist. The Channels tab includes an **Open routing matrix…** dialog
+for the DeckLink↔audio-flow crosspoints. The process runs as UID 1000 and must
+be able to create/rewrite that file — fix ownership once with a throwaway
+container (do **not** run the service as root just to chown):
 
 ```bash
 sudo mkdir -p /var/lib/mxl-decklink/config

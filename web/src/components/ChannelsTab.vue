@@ -19,6 +19,7 @@ import {
   valueOf,
 } from "../api.js";
 import SettingField from "./SettingField.vue";
+import AudioMatrixModal from "./AudioMatrixModal.vue";
 
 const CH_FIELD_ORDER = [
   "DIRECTION", "SUBDEVICE_INDEX", "VIDEO_MODE", "PIXEL_FORMAT", "MXL_VIDEO_FLOW_ID",
@@ -34,6 +35,7 @@ const error = ref("");
 const drafts = reactive({}); // idx -> { key -> string }
 const messages = reactive({}); // idx -> { kind, text }
 const extraPanels = ref([]); // newly added channel indices not yet in config
+const matrixOpenFor = ref(null); // channel idx or null
 /** Last auto-suggested values per channel — only overwrite fields that still match. */
 const lastSuggest = reactive({}); // idx -> { label, video, anc, audio: {afIdx: label} }
 
@@ -327,6 +329,34 @@ function onLabelChange(idx) {
   refreshSuggestions(idx);
 }
 
+function matrixFlows(idx) {
+  const d = drafts[idx] || {};
+  const flows = [];
+  for (let af = 0; af < afCount(idx); ++af) {
+    const count = Number(d[afKey(idx, af, "CHANNEL_COUNT")] || 2);
+    const mapStr = (d[afKey(idx, af, "MAP")] || "").trim();
+    const map = mapStr
+      ? mapStr.split(",").map((s) => Number(s.trim())).filter((n) => Number.isFinite(n))
+      : [];
+    flows.push({
+      index: af,
+      label: d[afKey(idx, af, "LABEL")] || `AF${af}`,
+      channelCount: count,
+      map,
+    });
+  }
+  return flows;
+}
+
+function applyMatrix(idx, updates) {
+  const d = drafts[idx];
+  if (!d) return;
+  for (const u of updates) {
+    d[afKey(idx, u.flowIndex, "MAP")] = u.map.join(",");
+    d[afKey(idx, u.flowIndex, "CHANNEL_COUNT")] = String(u.map.length);
+  }
+}
+
 const panelIndices = computed(() =>
   config.value ? [...channelIndices(config.value), ...extraPanels.value] : []
 );
@@ -381,6 +411,14 @@ onMounted(load);
           Unmapped channels are silence. Outputs: each DeckLink channel may appear in at most one map (no mixing);
           use the nil UUID to leave a flow unassigned.
         </p>
+        <div class="actions" style="justify-content:flex-start;margin:.2rem 0 .7rem">
+          <button
+            class="btn secondary small"
+            type="button"
+            :disabled="afCount(idx) < 1"
+            @click="matrixOpenFor = idx"
+          >Open routing matrix…</button>
+        </div>
         <div v-for="af in afCount(idx)" :key="af" class="af-row">
           <div class="af-title">AF{{ af - 1 }}</div>
           <div class="grid fields af-fields">
@@ -430,6 +468,18 @@ onMounted(load);
       :disabled="!config.file || panelIndices.length >= 16"
       @click="addChannel"
     >+ Add channel</button>
+
+    <AudioMatrixModal
+      v-if="matrixOpenFor !== null && drafts[matrixOpenFor]"
+      :open="matrixOpenFor !== null"
+      :channel-index="matrixOpenFor"
+      :direction="drafts[matrixOpenFor][chKey(matrixOpenFor, 'DIRECTION')] || 'input'"
+      :deck-channel-count="Number(drafts[matrixOpenFor][chKey(matrixOpenFor, 'AUDIO_CHANNEL_COUNT')] || 16)"
+      :flows="matrixFlows(matrixOpenFor)"
+      :editable="!!config.file"
+      @close="matrixOpenFor = null"
+      @apply="(u) => applyMatrix(matrixOpenFor, u)"
+    />
   </template>
 </template>
 

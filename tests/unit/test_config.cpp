@@ -81,11 +81,35 @@ TEST_CASE("channel index gaps are allowed (§4)")
     CHECK(cfg.channels[1].direction == config::Direction::Output);
 }
 
-TEST_CASE("missing card selector is rejected")
+TEST_CASE("missing card selector defaults to card index 0")
 {
     auto vars = minimalMultiChannel();
     vars.erase("MXL_DECKLINK_CARD_ID");
-    CHECK_THROWS_AS(config::loadConfig(envOf(vars)), config::ConfigError);
+    auto const cfg = config::loadConfig(envOf(vars));
+    REQUIRE(cfg.cardIndex.has_value());
+    CHECK(*cfg.cardIndex == 0);
+}
+
+TEST_CASE("empty channel list is allowed (first-deploy / web configure)")
+{
+    std::map<std::string, std::string> vars = {
+        {"MXL_DECKLINK_CARD_INDEX", "0"},
+    };
+    auto const cfg = config::loadConfig(envOf(vars));
+    CHECK(cfg.channels.empty());
+    CHECK(cfg.minHealthyChannels == 0);
+    CHECK(*cfg.cardIndex == 0);
+}
+
+TEST_CASE("completely empty env still loads with defaults")
+{
+    auto const cfg = config::loadConfig(envOf({}));
+    CHECK(cfg.channels.empty());
+    CHECK(cfg.minHealthyChannels == 0);
+    REQUIRE(cfg.cardIndex.has_value());
+    CHECK(*cfg.cardIndex == 0);
+    CHECK(cfg.domainPath == "/dev/shm/mxl");
+    CHECK(cfg.webEnable);
 }
 
 TEST_CASE("multiple card selectors are rejected")

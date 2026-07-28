@@ -189,11 +189,11 @@ Multi-channel operation uses **indexed prefixes `CHx_…`** (x = 0..15), one pre
 
 | Variable | Type | Default | Required | Description |
 |---|---|---|---|---|
-| `MXL_DECKLINK_CARD_ID` | Hex string (32-bit) | — | one of ID/NAME/INDEX | `BMDDeckLinkPersistentID` of the card — stable across reboots/slots. Recommended. Example `0xa1b2c3d4`. |
-| `MXL_DECKLINK_CARD_NAME` | String | — | see above | Human-readable name from `GetDisplayName`, e.g. `"DeckLink Duo 2"`. |
-| `MXL_DECKLINK_CARD_INDEX` | Integer ≥0 | — | see above | Fallback: zero-based card index in enumeration order. Not reboot-stable; lab use only. |
+| `MXL_DECKLINK_CARD_ID` | Hex string (32-bit) | — | no† | `BMDDeckLinkPersistentID` of the card — stable across reboots/slots. Recommended. Example `0xa1b2c3d4`. |
+| `MXL_DECKLINK_CARD_NAME` | String | — | no† | Human-readable name from `GetDisplayName`, e.g. `"DeckLink Duo 2"`. |
+| `MXL_DECKLINK_CARD_INDEX` | Integer ≥0 | `0` | no† | Zero-based card index in enumeration order. **Default when no selector is set** (first-deploy friendly; not reboot-stable — prefer `CARD_ID` in production). |
 | `MXL_DECKLINK_CARD_PROFILE` | enum | — | no | Card profile applied at startup (SDI cards only): `one-full-duplex`, `two-half-duplex`, `four-half-duplex`, `one-half-duplex`. Ignored on profile-less cards (IP 100G). |
-| `MXL_DOMAIN_PATH` | Filesystem path | `/dev/shm/mxl` | no | Domain directory; must be tmpfs-backed. Expected to be mounted, not created by the container. Production examples use `/Volumes/mxl/<domain>` (CBC `mxl-hands-on` pattern, §5.2). |
+| `MXL_DOMAIN_PATH` | Filesystem path | `/dev/shm/mxl` | no | Domain directory; should be tmpfs-backed. Created automatically if missing. Production examples use `/Volumes/mxl/<domain>` (CBC `mxl-hands-on` pattern, §5.2). |
 | `MXL_TIMESTAMP_SOURCE` | enum | `hardware` | no | `hardware` (hardware reference clock) or `host` (`CLOCK_TAI`). |
 | `MXL_HUGEPAGE_PATH` | Filesystem path | — | no | Optional HugePages mount used as backing for grain buffers (UHD scale-out; see §6.4). |
 | `MXL_CPU_PIN_LIST` | CPU list | — | no | Comma-separated CPU list for pinning; overrides Kubernetes CPU-manager assignment. Use outside Kubernetes only. |
@@ -202,7 +202,7 @@ Multi-channel operation uses **indexed prefixes `CHx_…`** (x = 0..15), one pre
 | `MXL_PTP_INTERFACE` | Interface name | — | no | Network interface for PTP status correlation (IP cards); informational for health/metrics. |
 | `WEB_ENABLE` | bool | `true` | no | Enables the embedded web interface and its mutating REST API (§7.5). Health endpoints and `/metrics` are always served. |
 | `WEB_PORT` | Port | `8080` | no | Consolidated HTTP port for the web UI, `/api/…`, `/livez` `/readyz` `/statusz`, and `/metrics` (§7.1). |
-| `MXL_HEALTH_MIN_HEALTHY_CHANNELS` | Integer | `1` | no | Readiness threshold; see §7.2. Set to the total configured channel count for strict "all channels up" semantics. |
+| `MXL_HEALTH_MIN_HEALTHY_CHANNELS` | Integer | `1` | no | Readiness threshold; see §7.2. Auto-clamped to `0` when no channels are configured yet. Set to the total configured channel count for strict "all channels up" semantics. |
 | `SIGNAL_LOSS_TIMEOUT_S` | Integer | `30` | no | Input channels: window without signal after which a stream reset cycle is triggered. |
 | `STARTUP_MAX_RETRIES` | Integer | `10` | no | Retry counter for card-level startup. |
 | `SHUTDOWN_TIMEOUT_S` | Integer | `10` | no | Grace period on SIGTERM. |
@@ -211,6 +211,8 @@ Multi-channel operation uses **indexed prefixes `CHx_…`** (x = 0..15), one pre
 | `DECKLINK_LIB_MODE` | enum | `bundled` | no | `bundled` (libDeckLinkAPI.so from image) or `hostmount` (bind-mounted from host); documentation of the chosen pattern, see §5.1. |
 | `MXL_CONFIG_FILE` | Filesystem path | — | no | Path of the JSON configuration file (§4.5). When set, the file supplies the file layer of the configuration; the web interface persists changes to it. Mounted as a config volume in container deployments. |
 | `MXL_DOMAIN_SCAN_PATH` | Filesystem path | `/dev/shm` | no | Root directory scanned for MXL domains (§7.6). Prefer a dedicated tmpfs (e.g. `/Volumes/mxl`) over mounting the host's whole `/dev/shm` (§5.2). |
+
+† At most one of `CARD_ID` / `CARD_NAME` / `CARD_INDEX` may be set. If none are set, `CARD_INDEX=0` is assumed. Channels (`CHx_DIRECTION`, …) are **optional at startup** — an empty channel list starts the process and web UI so operators can finish configuration interactively (with `MXL_CONFIG_FILE` mounted). If the DeckLink card cannot be opened and no channels are configured, the process falls back to the mock card so the UI stays reachable; set a real card selector and restart before enabling live channels.
 
 ### 4.2 Per-Channel Configuration (Prefix `CHx_`)
 

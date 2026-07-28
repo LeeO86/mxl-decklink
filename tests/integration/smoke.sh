@@ -95,9 +95,13 @@ print(ch['$2'])
 
 # ---------------------------------------------------------------------------
 say "test 1: invalid configuration exits 78 (EX_CONFIG)"
-env -i PATH="$PATH" LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" "$BIN" >/dev/null 2>&1
+env -i PATH="$PATH" LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" \
+    MXL_DECKLINK_BACKEND=mock MXL_DECKLINK_CARD_INDEX=0 \
+    CH0_DIRECTION=input CH0_SUBDEVICE_INDEX=0 \
+    CH0_MXL_VIDEO_FLOW_ID=not-a-uuid \
+    "$BIN" >/dev/null 2>&1
 rc=$?
-[[ $rc == 78 ]] || fail "expected exit 78 for empty env, got $rc"
+[[ $rc == 78 ]] || fail "expected exit 78 for invalid UUID, got $rc"
 
 DOMAIN=$(mktemp -d /dev/shm/mxl-smoke.XXXXXX)
 env -i PATH="$PATH" LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" \
@@ -107,9 +111,38 @@ env -i PATH="$PATH" LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" \
     "$BIN" >/dev/null 2>&1
 rc=$?
 [[ $rc == 78 ]] || fail "expected exit 78 for mixed v1.0/v1.1 env, got $rc"
+rm -rf "$DOMAIN"
+DOMAIN=""
+
+# ---------------------------------------------------------------------------
+say "test 1b: first-deploy empty config brings the web UI up"
+EMPTY_DOMAIN=$(mktemp -d /dev/shm/mxl-smoke.XXXXXX)
+DOMAIN="$EMPTY_DOMAIN"
+env -i PATH="$PATH" LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" \
+    MXL_DECKLINK_BACKEND=mock MXL_DOMAIN_PATH="$EMPTY_DOMAIN" \
+    WEB_PORT="$WEB_PORT" LOG_LEVEL=info \
+    "$BIN" >/tmp/mxl-smoke-empty-$$.log 2>&1 &
+PID=$!
+if ! wait_for_readyz 20; then
+    fail "empty config: /readyz did not reach 200"
+    sed -n '1,40p' /tmp/mxl-smoke-empty-$$.log >&2
+else
+    chans=$(curl -s --max-time 3 "http://127.0.0.1:$WEB_PORT/api/status" |
+        python3 -c "import json,sys; print(len(json.load(sys.stdin).get('channels',['x'])))") || chans=err
+    [[ "$chans" == "0" ]] || fail "empty config: expected 0 channels, got $chans"
+    [[ "$(http_code /)" == "200" ]] || fail "empty config: web UI not served"
+    say "empty config: UI up with 0 channels"
+fi
+kill -TERM "$PID" 2>/dev/null
+wait "$PID" 2>/dev/null || true
+PID=""
+rm -rf "$EMPTY_DOMAIN"
+DOMAIN=""
+rm -f /tmp/mxl-smoke-empty-$$.log
 
 # ---------------------------------------------------------------------------
 say "test 2: end-to-end input+output channels on the mock card"
+DOMAIN=$(mktemp -d /dev/shm/mxl-smoke.XXXXXX)
 LOG="/tmp/mxl-smoke-$$.log"
 common_env "$BIN" >"$LOG" 2>&1 &
 PID=$!
@@ -307,7 +340,11 @@ wait_for_readyz 30 || fail "web run: /readyz did not reach 200"
 webapi() { curl -s --max-time 5 "http://127.0.0.1:$WEB_PORT$1"; }
 
 # UI page and status endpoint (same port as health/metrics).
-webapi / | grep -q "mxl-decklink" || fail "web UI index page not served"
+# Do not use `curl | grep -q` under `pipefail`: grep exits on the first match
+# while curl/echo is still writing → SIGPIPE → false failure (flaky once the
+# embedded SPA grew past ~100 KiB).
+page=$(webapi /) || page=""
+grep -q "mxl-decklink" <<<"$page" || fail "web UI index page not served (got ${#page} bytes)"
 # Health and metrics share WEB_PORT.
 [[ "$(http_code /livez)" == "200" ]] || fail "/livez not on WEB_PORT"
 curl -s --max-time 3 "http://127.0.0.1:$WEB_PORT/metrics" | grep -q mxl_decklink_frames_total \
