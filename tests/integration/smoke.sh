@@ -340,7 +340,11 @@ wait_for_readyz 30 || fail "web run: /readyz did not reach 200"
 webapi() { curl -s --max-time 5 "http://127.0.0.1:$WEB_PORT$1"; }
 
 # UI page and status endpoint (same port as health/metrics).
-webapi / | grep -q "mxl-decklink" || fail "web UI index page not served"
+# Do not use `curl | grep -q` under `pipefail`: grep exits on the first match
+# while curl/echo is still writing → SIGPIPE → false failure (flaky once the
+# embedded SPA grew past ~100 KiB).
+page=$(webapi /) || page=""
+grep -q "mxl-decklink" <<<"$page" || fail "web UI index page not served (got ${#page} bytes)"
 # Health and metrics share WEB_PORT.
 [[ "$(http_code /livez)" == "200" ]] || fail "/livez not on WEB_PORT"
 curl -s --max-time 3 "http://127.0.0.1:$WEB_PORT/metrics" | grep -q mxl_decklink_frames_total \

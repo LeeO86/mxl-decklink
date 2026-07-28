@@ -57,6 +57,7 @@ set(WEBUI_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/web/src/components/SettingField.vue
     ${CMAKE_CURRENT_SOURCE_DIR}/web/src/components/Dashboard.vue
     ${CMAKE_CURRENT_SOURCE_DIR}/web/src/components/ChannelsTab.vue
+    ${CMAKE_CURRENT_SOURCE_DIR}/web/src/components/AudioMatrixModal.vue
     ${CMAKE_CURRENT_SOURCE_DIR}/web/src/components/CardTab.vue
     ${CMAKE_CURRENT_SOURCE_DIR}/web/src/components/MxlTab.vue
     ${CMAKE_CURRENT_SOURCE_DIR}/web/src/components/SettingsTab.vue
