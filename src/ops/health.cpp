@@ -87,6 +87,43 @@ namespace mxldl::ops
             body += ",\"reconnects\":" + std::to_string(v.reconnects);
             body += ",\"grains_committed\":" + std::to_string(v.grainsCommitted);
             body += ",\"active_video_flow_id\":\"" + v.activeVideoFlowId + "\"";
+            body += ",\"audio\":{";
+            body += "\"enabled\":" + std::string(v.cfg.audioEnable ? "true" : "false");
+            body += ",\"deck_channel_count\":" + std::to_string(v.cfg.audioChannelCount);
+            body += ",\"flow_count\":" + std::to_string(v.cfg.audioFlows.size());
+            if (v.cfg.direction == config::Direction::Output)
+            {
+                body += ",\"decklink_buffered_audio_frames\":" + std::to_string(v.bufferedAudioFrames);
+            }
+            else
+            {
+                body += ",\"decklink_buffered_audio_frames\":null";
+            }
+            body += ",\"flows\":[";
+            bool firstAf = true;
+            for (auto const& af : v.cfg.audioFlows)
+            {
+                if (!firstAf)
+                {
+                    body += ',';
+                }
+                firstAf = false;
+                body += "{\"index\":" + std::to_string(af.index);
+                body += ",\"flow_id\":\"" + af.flowId.toString() + "\"";
+                body += ",\"channel_count\":" + std::to_string(af.channelCount);
+                body += ",\"unassigned\":" + std::string(af.flowId.isNil() ? "true" : "false");
+                body += ",\"map\":[";
+                for (std::size_t i = 0; i < af.deckLinkChannels.size(); ++i)
+                {
+                    if (i > 0)
+                    {
+                        body += ',';
+                    }
+                    body += std::to_string(af.deckLinkChannels[i]);
+                }
+                body += "]}";
+            }
+            body += "]}";
             body += "}";
         }
         body += "]}";

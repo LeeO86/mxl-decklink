@@ -129,18 +129,30 @@ CH0_DIRECTION=input \
 CH0_SUBDEVICE_INDEX=0 \
 CH0_VIDEO_MODE=auto \
 CH0_MXL_VIDEO_FLOW_ID=5fbec3b1-1b0f-417d-9059-8b94a47197ed \
-CH0_MXL_AUDIO_FLOW_ID=b3bb5be7-9fe9-4324-a5bb-4c70e1084449 \
+CH0_AF0_FLOW_ID=b3bb5be7-9fe9-4324-a5bb-4c70e1084449 \
+CH0_AF0_CHANNEL_COUNT=2 \
+CH0_AF0_MAP=0,1 \
 ./build/mxl-decklink
 ```
 The full variable reference is SPECIFICATION.md §4 (global) and §4.2
-(per-channel `CHx_*`). Docker Compose and Kubernetes examples live in
+(per-channel `CHx_*`, including the `CHx_AFn_*` audio routing matrix). Docker Compose and Kubernetes examples live in
 [`docker/docker-compose.yaml`](docker/docker-compose.yaml),
 [`deploy/mxl-decklink.yaml`](deploy/mxl-decklink.yaml) and
 [`deploy/generic-device-plugin.yaml`](deploy/generic-device-plugin.yaml).
 
 Then open the web interface at `http://<host>:8080/` for interactive setup:
 mount a config volume and set `MXL_CONFIG_FILE=/config/mxl-decklink.json` so
-changes persist. The Settings tab renders the effective configuration as a
+changes persist. The process runs as UID 1000 and must be able to create/rewrite
+that file — fix ownership once with a throwaway container (do **not** run the
+service as root just to chown):
+
+```bash
+sudo mkdir -p /var/lib/mxl-decklink/config
+docker run --rm -v /var/lib/mxl-decklink/config:/config busybox \
+  chown -R 1000:1000 /config
+```
+
+The Settings tab renders the effective configuration as a
 copyable `KEY=value` block if you prefer to freeze a web-configured setup
 back into environment variables (which then override the file and become
 read-only in the UI).

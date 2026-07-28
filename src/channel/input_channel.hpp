@@ -8,6 +8,7 @@
 #include <mutex>
 #include <optional>
 #include <thread>
+#include <vector>
 
 #include "channel/state.hpp"
 #include "config/config.hpp"
@@ -49,6 +50,13 @@ namespace mxldl::channel
         void housekeeping();
 
     private:
+        struct AudioFlowWriter
+        {
+            config::AudioFlowConfig cfg;
+            util::Uuid flowId;
+            std::unique_ptr<mxlbridge::AudioWriter> writer;
+        };
+
         void supervisorLoop();
         bool bringUp();
         void tearDownStreaming();
@@ -56,7 +64,7 @@ namespace mxldl::channel
         void handleFormatChange(dl::FormatChange const& fc);
         void performFormatChange();
         std::uint64_t frameTimestampTai(dl::VideoFrameView const& video);
-        void createWriters(config::VideoMode const& mode, util::Uuid const& videoId, std::optional<util::Uuid> const& audioId,
+        void createWriters(config::VideoMode const& mode, util::Uuid const& videoId, std::vector<util::Uuid> const& audioIds,
             std::optional<util::Uuid> const& ancId);
         void destroyWriters();
 
@@ -73,7 +81,7 @@ namespace mxldl::channel
         // hot path takes it uncontended (try_lock) — see handleFrame.
         std::mutex _writerMutex;
         std::unique_ptr<mxlbridge::VideoWriter> _videoWriter;
-        std::unique_ptr<mxlbridge::AudioWriter> _audioWriter;
+        std::vector<AudioFlowWriter> _audioFlows;
         std::unique_ptr<mxlbridge::AncWriter> _ancWriter;
         std::atomic<bool> _writersValid{false};
 

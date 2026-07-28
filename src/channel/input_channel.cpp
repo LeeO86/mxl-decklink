@@ -211,7 +211,13 @@ namespace mxldl::channel
             }
 
             // §3.10 step 6: MXL writers before DeckLink enable.
-            createWriters(_currentMode, _cfg.videoFlowId, _cfg.audioFlowId, _cfg.ancFlowId);
+            std::vector<util::Uuid> audioIds;
+            audioIds.reserve(_cfg.audioFlows.size());
+            for (auto const& af : _cfg.audioFlows)
+            {
+                audioIds.push_back(af.flowId);
+            }
+            createWriters(_currentMode, _cfg.videoFlowId, audioIds, _cfg.ancFlowId);
 
             // §3.10 steps 7–9.
             _capture = _subDevice.openCapture();
@@ -307,7 +313,7 @@ namespace mxldl::channel
         destroyWriters();
     }
 
-    void InputChannel::createWriters(config::VideoMode const& mode, util::Uuid const& videoId, std::optional<util::Uuid> const& audioId,
+    void InputChannel::createWriters(config::VideoMode const& mode, util::Uuid const& videoId, std::vector<util::Uuid> const& audioIds,
         std::optional<util::Uuid> const& ancId)
     {
         std::lock_guard const lock{_writerMutex};
@@ -340,17 +346,33 @@ namespace mxldl::channel
                 });
         }
 
-        if (_cfg.audioEnable && audioId)
+        _audioFlows.clear();
+        if (_cfg.audioEnable)
         {
-            mxlbridge::AudioFlowParams ap;
-            ap.id = *audioId;
-            ap.label = _cfg.audioFlowLabel.empty() ? _cardIdLabel + "-ch" + std::to_string(_cfg.index) + "-audio" : _cfg.audioFlowLabel;
-            ap.description = "mxl-decklink input channel " + std::to_string(_cfg.index) + " audio";
-            ap.groupHint = _cfg.groupHint + ":Audio";
-            ap.sourceId = _cfg.sourceId;
-            ap.deviceId = _cfg.deviceId;
-            ap.channelCount = static_cast<std::uint32_t>(_cfg.audioChannelCount);
-            _audioWriter = std::make_unique<mxlbridge::AudioWriter>(_domain, ap, _cfg.commitBatchHintAudio);
+            _audioFlows.reserve(_cfg.audioFlows.size());
+            for (std::size_t i = 0; i < _cfg.audioFlows.size(); ++i)
+            {
+                auto const& afCfg = _cfg.audioFlows[i];
+                util::Uuid const id = (i < audioIds.size()) ? audioIds[i] : afCfg.flowId;
+                if (id.isNil())
+                {
+                    continue; // inputs reject nil at config time; defensive skip
+                }
+                mxlbridge::AudioFlowParams ap;
+                ap.id = id;
+                ap.label = afCfg.label.empty() ? _cardIdLabel + "-ch" + std::to_string(_cfg.index) + "-audio" + std::to_string(afCfg.index + 1)
+                                               : afCfg.label;
+                ap.description = "mxl-decklink input channel " + std::to_string(_cfg.index) + " audio flow " + std::to_string(afCfg.index);
+                ap.groupHint = _cfg.groupHint + ":Audio";
+                ap.sourceId = _cfg.sourceId;
+                ap.deviceId = _cfg.deviceId;
+                ap.channelCount = static_cast<std::uint32_t>(afCfg.channelCount);
+                AudioFlowWriter slot;
+                slot.cfg = afCfg;
+                slot.flowId = id;
+                slot.writer = std::make_unique<mxlbridge::AudioWriter>(_domain, ap, _cfg.commitBatchHintAudio);
+                _audioFlows.push_back(std::move(slot));
+            }
         }
 
         if (_cfg.ancEnable && ancId)
@@ -376,7 +398,7 @@ namespace mxldl::channel
         _writersValid.store(false);
         std::lock_guard const lock{_writerMutex};
         _videoWriter.reset();
-        _audioWriter.reset();
+        _audioFlows.clear();
         _ancWriter.reset();
         _flowWriterActive->set(0);
     }
@@ -466,8 +488,8 @@ namespace mxldl::channel
         _framesTotal->inc();
         _status.framesTotal.fetch_add(1);
 
-        // Audio (§3.4): deinterleave + float conversion into the ring.
-        if (audio != nullptr && _audioWriter)
+        // Audio (§3.4): deinterleave + float conversion into each mapped flow.
+        if (audio != nullptr && !_audioFlows.empty())
         {
             mxlRational const audioRate{48000, 1};
             auto const nowEnd = ::mxlTimestampToIndex(&audioRate, tai);
@@ -492,11 +514,24 @@ namespace mxldl::channel
                     _nextAudioEndIndex = nowEnd;
                 }
             }
-            auto const audioStatus = _audioWriter->writeSamples(_nextAudioEndIndex, audio->bytes, audio->sampleFrames,
-                static_cast<std::size_t>(_cfg.audioChannelCount), _cfg.audioSampleType);
-            if (audioStatus != MXL_STATUS_OK)
+            auto const deckChannels = static_cast<std::size_t>(_cfg.audioChannelCount);
+            for (auto& afw : _audioFlows)
             {
-                log::debug("audio_write_failed", {{"channel_index", _cfg.index}, {"status", static_cast<int>(audioStatus)}});
+                if (!afw.writer)
+                {
+                    continue;
+                }
+                auto const audioStatus = afw.writer->writeSamples(_nextAudioEndIndex, audio->bytes, audio->sampleFrames, deckChannels,
+                    afw.cfg.deckLinkChannels, _cfg.audioSampleType);
+                if (audioStatus != MXL_STATUS_OK)
+                {
+                    log::debug("audio_write_failed",
+                        {
+                            {"channel_index", _cfg.index},
+                            {"audio_flow_index", afw.cfg.index},
+                            {"status", static_cast<int>(audioStatus)},
+                        });
+                }
             }
         }
 
@@ -561,12 +596,17 @@ namespace mxldl::channel
         ++_formatChangeCounter;
         auto const signature = fc.newMode.name + "#" + std::to_string(_formatChangeCounter);
         auto const newVideoId = util::deriveUuid(_cfg.videoFlowId, signature);
-        auto const newAudioId = _cfg.audioFlowId ? std::make_optional(util::deriveUuid(*_cfg.audioFlowId, signature)) : std::nullopt;
+        std::vector<util::Uuid> newAudioIds;
+        newAudioIds.reserve(_cfg.audioFlows.size());
+        for (auto const& af : _cfg.audioFlows)
+        {
+            newAudioIds.push_back(util::deriveUuid(af.flowId, signature));
+        }
         auto const newAncId = _cfg.ancFlowId ? std::make_optional(util::deriveUuid(*_cfg.ancFlowId, signature)) : std::nullopt;
 
         try
         {
-            createWriters(fc.newMode, newVideoId, newAudioId, newAncId);
+            createWriters(fc.newMode, newVideoId, newAudioIds, newAncId);
         }
         catch (std::exception const& e)
         {

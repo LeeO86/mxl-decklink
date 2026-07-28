@@ -222,14 +222,16 @@ Multi-channel operation uses **indexed prefixes `CHx_…`** (x = 0..15), one pre
 | `CHx_PIXEL_FORMAT` | enum | `10BitYUV` | no | `10BitYUV` (v210, recommended, MXL-native), `10BitYUVA` (v210a fill+key), `8BitYUV` (only with `CHx_ALLOW_FORMAT_CONVERSION`). |
 | `CHx_ALLOW_FORMAT_CONVERSION` | bool | `false` | no | Permits 8-bit → 10-bit v210 conversion inside the container. |
 | `CHx_VIDEO_ANC_ENABLE` | bool | `false` | no | Creates an additional `video/smpte291` flow for ANC data. |
-| `CHx_AUDIO_ENABLE` | bool | `true` | no | If `false`, no audio flow for this channel. |
-| `CHx_AUDIO_CHANNEL_COUNT` | enum | `16` | no | 2, 8, 16, 32, 64. Card-dependent. |
+| `CHx_AUDIO_ENABLE` | bool | `true` | no | If `false`, no MXL audio flows for this channel. |
+| `CHx_AUDIO_CHANNEL_COUNT` | enum | `16` | no | DeckLink interleaved PCM width: 2, 8, 16, 32, 64. Card-dependent. This is the routing-matrix source/sink size — not an MXL flow channel count. |
 | `CHx_AUDIO_SAMPLE_TYPE` | enum | `32bit` | no | `16bit` or `32bit` (DeckLink side). Always converted to MXL float32. |
-| `CHx_MXL_VIDEO_FLOW_ID` | UUID | — | yes | UUID of the video flow. Must be stable across deployments (managed externally, e.g. NMOS registry). |
-| `CHx_MXL_AUDIO_FLOW_ID` | UUID | — | yes if audio enabled | UUID of the audio flow. |
+| `CHx_MXL_VIDEO_FLOW_ID` | UUID | — | yes | UUID of the video flow. Must be stable across deployments (managed externally, e.g. NMOS registry). On **output** channels the nil UUID (`00000000-0000-0000-0000-000000000000`) means unassigned (channel stays down until a flow is set). |
+| `CHx_AFn_FLOW_ID` | UUID | — | yes if audio enabled (`n` contiguous from 0) | UUID of audio flow `n`. Inputs require a non-nil UUID. Outputs may use the nil UUID for an unassigned slot (mapped DeckLink channels stay silent). |
+| `CHx_AFn_CHANNEL_COUNT` | Integer 1..64 | — | yes with `FLOW_ID` | MXL `audio/float32` channel count for this flow (any count; not limited to named layouts). |
+| `CHx_AFn_MAP` | comma-separated ints | — | yes with `FLOW_ID` | DeckLink channel indices mapped into this flow; length must equal `CHANNEL_COUNT`. Indices are in `0 .. AUDIO_CHANNEL_COUNT-1`. Unmapped DeckLink channels are silence both ways. On **output**, each DeckLink index may appear in at most one map (no mixing). On **input**, the same DeckLink index may fan out to multiple flows. |
+| `CHx_AFn_LABEL` | String | `ch<x>-audio<n+1>` | no | Human-readable audio flow label. |
 | `CHx_MXL_ANC_FLOW_ID` | UUID | — | yes if ANC enabled | UUID of the ANC flow. |
 | `CHx_MXL_VIDEO_FLOW_LABEL` | String | `"<card>-ch<x>-video"` | no | Human-readable `label` in the flow descriptor. |
-| `CHx_MXL_AUDIO_FLOW_LABEL` | String | — | no | Same, audio. |
 | `CHx_MXL_GROUP_HINT` | String | Channel label | no | Value for `urn:x-nmos:tag:grouphint/v1.0` — groups V/A/ANC in the NMOS sense. |
 | `CHx_MXL_DEVICE_ID` | UUID | — | no | `device_id` in the flow descriptor (for external NMOS binding). |
 | `CHx_MXL_SOURCE_ID` | UUID | — | no | `source_id` in the flow descriptor. |
@@ -242,11 +244,11 @@ Multi-channel operation uses **indexed prefixes `CHx_…`** (x = 0..15), one pre
 
 ### 4.3 ENV Validation
 
-All environment variables are validated at startup; invalid values exit with code 78 (EX_CONFIG) and a structured error log entry. Cross-checks include: every `CHx_SUBDEVICE_INDEX` must exist on the matched card; the same sub-device index may appear at most once per direction; `auto` video mode is rejected on output channels; flow UUIDs must be unique across all channels of the container.
+All environment variables are validated at startup; invalid values exit with code 78 (EX_CONFIG) and a structured error log entry. Cross-checks include: every `CHx_SUBDEVICE_INDEX` must exist on the matched card; the same sub-device index may appear at most once per direction; `auto` video mode is rejected on output channels; non-nil flow UUIDs must be unique across all channels of the same role (writers vs readers); audio-flow maps must be contiguous from `AF0` and, on outputs, must not mix multiple sources onto one DeckLink channel.
 
 ### 4.4 Backward Compatibility with Single-Channel (v1.0) Configuration
 
-If **no** `CHx_…` variables are present, but the legacy v1.0 single-channel variables are set (`DIRECTION`, `DECKLINK_DEVICE_ID`/`_NAME`/`_INDEX`, `VIDEO_MODE`, `MXL_VIDEO_FLOW_ID`, `MXL_AUDIO_FLOW_ID`, …), the container interprets them as an implicit channel 0 (`CH0_…`), with the legacy device selector resolving to (card, sub-device) automatically. All v1.0 deployments therefore run unchanged. If v1.0 and v1.1 variables are **mixed**, the container terminates at startup with a clear error.
+If **no** `CHx_…` variables are present, but the legacy v1.0 single-channel variables are set (`DIRECTION`, `DECKLINK_DEVICE_ID`/`_NAME`/`_INDEX`, `VIDEO_MODE`, `MXL_VIDEO_FLOW_ID`, `AF0_FLOW_ID` / `AF0_CHANNEL_COUNT` / `AF0_MAP`, …), the container interprets them as an implicit channel 0 (`CH0_…`), with the legacy device selector resolving to (card, sub-device) automatically. The former single-flow keys `MXL_AUDIO_FLOW_ID` / `MXL_AUDIO_FLOW_LABEL` (and their `CHx_` forms) are **rejected** — use `CHx_AFn_*` instead. If v1.0 and v1.1 variables are **mixed**, the container terminates at startup with a clear error.
 
 ### 4.5 Configuration File and Precedence
 
@@ -350,7 +352,7 @@ The container exposes a **single consolidated HTTP port** `WEB_PORT` (default 80
 
 - **`/livez`** returns **200 OK** as long as the process is alive and the housekeeping thread has been active within the last 5 seconds. On deadlock or total failure it times out → Kubernetes kills the pod.
 - **`/readyz`** returns **200 OK** exactly when at least `MXL_HEALTH_MIN_HEALTHY_CHANNELS` channels are in state `healthy`. Below the threshold it returns **503 Service Unavailable** with a JSON body listing per-channel state. Default threshold is 1; for critical broadcast setups set it to the total configured channel count — "ready" then strictly means "all channels up".
-- **`/statusz`** always returns **200 OK** with a full JSON report: per channel its state, last frame timestamp, signal lock, frame drops, reconnect counter, MXL grain commit count.
+- **`/statusz`** always returns **200 OK** with a full JSON report: per channel its state, last frame timestamp, signal lock, frame drops, reconnect counter, MXL grain commit count, and an `audio` summary (enable, DeckLink width, per-AF map/UUID, output buffered audio sample frames when available).
 - **`/metrics`** serves Prometheus text format.
 - When `WEB_ENABLE=true` (default): the embedded web UI (`/`) and the `/api/…` REST API (§7.5). When `WEB_ENABLE=false`, UI and mutating API are absent; health and metrics remain.
 
@@ -410,7 +412,7 @@ The web interface implements **no authentication** — like the health and metri
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/api/status` | GET | Dashboard summary (process, card, channels, domain) |
+| `/api/status` | GET | Dashboard summary (process, card, channels, domain). Each channel includes an `audio` object: enable/DeckLink width/sample type, `flows[]` (AF index, map, label, UUID), MXL join (`mxl_active` / `mxl_head_index` from the domain), and for outputs `decklink_buffered_audio_frames` (`IDeckLinkOutput::GetBufferedAudioSampleFrameCount`). |
 | `/api/card` | GET | Card + per-sub-device capabilities and live SDK status |
 | `/api/config` | GET | All settings with value, provenance, editability, env-var name |
 | `/api/config` | PUT | Partial update `{key: value \| null}`; validates, persists, applies; reports `restart_required` |

@@ -38,7 +38,7 @@ namespace mxldl::mxlbridge
     }
 
     mxlStatus AudioWriter::writeSamples(std::uint64_t endIndex, void const* interleavedPcm, std::size_t sampleFrames, std::size_t deckLinkChannels,
-        config::AudioSampleType sampleType)
+        std::span<int const> channelMap, config::AudioSampleType sampleType)
     {
         // §3.4 SDK requirement: batches must stay below half the ring.
         if (sampleFrames > _configInfo.continuous.bufferLength / 2)
@@ -55,11 +55,13 @@ namespace mxldl::mxlbridge
 
         if (sampleType == config::AudioSampleType::Int32)
         {
-            util::deinterleaveInt32ToFloat(static_cast<std::int32_t const*>(interleavedPcm), sampleFrames, deckLinkChannels, slices);
+            util::deinterleaveInt32ToFloatMapped(static_cast<std::int32_t const*>(interleavedPcm), sampleFrames, deckLinkChannels, channelMap,
+                slices);
         }
         else
         {
-            util::deinterleaveInt16ToFloat(static_cast<std::int16_t const*>(interleavedPcm), sampleFrames, deckLinkChannels, slices);
+            util::deinterleaveInt16ToFloatMapped(static_cast<std::int16_t const*>(interleavedPcm), sampleFrames, deckLinkChannels, channelMap,
+                slices);
         }
 
         return ::mxlFlowWriterCommitSamples(_writer);

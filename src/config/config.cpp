@@ -119,10 +119,12 @@ namespace mxldl::config
             "AUDIO_CHANNEL_COUNT",
             "AUDIO_SAMPLE_TYPE",
             "MXL_VIDEO_FLOW_ID",
-            "MXL_AUDIO_FLOW_ID",
             "MXL_ANC_FLOW_ID",
             "MXL_VIDEO_FLOW_LABEL",
-            "MXL_AUDIO_FLOW_LABEL",
+            "AF0_FLOW_ID",
+            "AF0_CHANNEL_COUNT",
+            "AF0_MAP",
+            "AF0_LABEL",
             "MXL_GROUP_HINT",
             "MXL_DEVICE_ID",
             "MXL_SOURCE_ID",
@@ -281,14 +283,130 @@ namespace mxldl::config
                 fail(key("MXL_VIDEO_FLOW_ID") + " is required");
             }
             ch.videoFlowId = parseUuidOrFail(key("MXL_VIDEO_FLOW_ID"), *videoFlow);
-
-            if (auto const v = env.get(key("MXL_AUDIO_FLOW_ID")))
+            if (ch.direction == Direction::Input && ch.videoFlowId.isNil())
             {
-                ch.audioFlowId = parseUuidOrFail(key("MXL_AUDIO_FLOW_ID"), *v);
+                fail(key("MXL_VIDEO_FLOW_ID") + ": input channels require a non-nil video flow UUID");
             }
-            else if (ch.audioEnable)
+
+            // Removed single-flow keys — reject so old configs fail loudly.
+            if (env.has(key("MXL_AUDIO_FLOW_ID")) || env.has(key("MXL_AUDIO_FLOW_LABEL")))
             {
-                fail(key("MXL_AUDIO_FLOW_ID") + " is required when audio is enabled");
+                fail(key("MXL_AUDIO_FLOW_ID") + "/" + key("MXL_AUDIO_FLOW_LABEL") +
+                     " were removed: use CHx_AFn_FLOW_ID / CHx_AFn_CHANNEL_COUNT / CHx_AFn_MAP / CHx_AFn_LABEL");
+            }
+
+            if (ch.audioEnable)
+            {
+                constexpr int kMaxAudioFlows = 16;
+                for (int af = 0; af < kMaxAudioFlows; ++af)
+                {
+                    auto const flowIdName = prefix + "AF" + std::to_string(af) + "_FLOW_ID";
+                    auto const countName = prefix + "AF" + std::to_string(af) + "_CHANNEL_COUNT";
+                    auto const mapName = prefix + "AF" + std::to_string(af) + "_MAP";
+                    auto const labelName = prefix + "AF" + std::to_string(af) + "_LABEL";
+
+                    auto const flowIdVal = env.get(flowIdName);
+                    if (!flowIdVal)
+                    {
+                        // Contiguous discovery: stop at the first missing FLOW_ID.
+                        // Higher indices with keys present are a config error.
+                        for (int later = af + 1; later < kMaxAudioFlows; ++later)
+                        {
+                            if (env.has(prefix + "AF" + std::to_string(later) + "_FLOW_ID") ||
+                                env.has(prefix + "AF" + std::to_string(later) + "_CHANNEL_COUNT") ||
+                                env.has(prefix + "AF" + std::to_string(later) + "_MAP") ||
+                                env.has(prefix + "AF" + std::to_string(later) + "_LABEL"))
+                            {
+                                fail(prefix + "AF" + std::to_string(later) + "_*: audio flows must be contiguous from AF0 (gap at AF" +
+                                     std::to_string(af) + ")");
+                            }
+                        }
+                        break;
+                    }
+
+                    AudioFlowConfig flow;
+                    flow.index = af;
+                    flow.flowId = parseUuidOrFail(flowIdName, *flowIdVal);
+                    if (ch.direction == Direction::Input && flow.flowId.isNil())
+                    {
+                        fail(flowIdName + ": input channels require a non-nil audio flow UUID");
+                    }
+
+                    if (auto const v = env.get(countName))
+                    {
+                        flow.channelCount = parseInt(countName, *v, 1, 64);
+                    }
+                    else
+                    {
+                        fail(countName + " is required when " + flowIdName + " is set");
+                    }
+
+                    auto const mapVal = env.get(mapName);
+                    if (!mapVal)
+                    {
+                        fail(mapName + " is required when " + flowIdName + " is set");
+                    }
+                    {
+                        std::string const& raw = *mapVal;
+                        std::size_t start = 0;
+                        while (start < raw.size())
+                        {
+                            auto const comma = raw.find(',', start);
+                            auto const token = raw.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+                            if (token.empty())
+                            {
+                                fail(mapName + ": empty entry in '" + raw + "'");
+                            }
+                            int const dlCh = parseInt(mapName, token, 0, ch.audioChannelCount - 1);
+                            flow.deckLinkChannels.push_back(dlCh);
+                            if (comma == std::string::npos)
+                            {
+                                break;
+                            }
+                            start = comma + 1;
+                        }
+                        if (static_cast<int>(flow.deckLinkChannels.size()) != flow.channelCount)
+                        {
+                            fail(mapName + ": expected " + std::to_string(flow.channelCount) + " DeckLink indices (CHANNEL_COUNT), got " +
+                                 std::to_string(flow.deckLinkChannels.size()));
+                        }
+                    }
+
+                    if (auto const v = env.get(labelName))
+                    {
+                        flow.label = *v;
+                    }
+                    else
+                    {
+                        flow.label = "ch" + std::to_string(index) + "-audio" + std::to_string(af + 1);
+                    }
+                    ch.audioFlows.push_back(std::move(flow));
+                }
+
+                if (ch.audioFlows.empty())
+                {
+                    fail(prefix + "AF0_FLOW_ID is required when audio is enabled (one or more CHx_AFn_* flows)");
+                }
+
+                // Output sink: each DeckLink channel may appear in at most one map (no mixing).
+                if (ch.direction == Direction::Output)
+                {
+                    std::vector<int> owners(static_cast<std::size_t>(ch.audioChannelCount), -1);
+                    for (auto const& flow : ch.audioFlows)
+                    {
+                        for (std::size_t i = 0; i < flow.deckLinkChannels.size(); ++i)
+                        {
+                            int const dl = flow.deckLinkChannels[i];
+                            if (owners[static_cast<std::size_t>(dl)] >= 0)
+                            {
+                                fail(prefix + "AF" + std::to_string(flow.index) + "_MAP: DeckLink channel " + std::to_string(dl) +
+                                     " is already sourced by AF" + std::to_string(owners[static_cast<std::size_t>(dl)]) +
+                                     " (output sinks accept only one source — no mixing)");
+                            }
+                            owners[static_cast<std::size_t>(dl)] = flow.index;
+                        }
+                    }
+                }
             }
 
             if (auto const v = env.get(key("MXL_ANC_FLOW_ID")))
@@ -303,10 +421,6 @@ namespace mxldl::config
             if (auto const v = env.get(key("MXL_VIDEO_FLOW_LABEL")))
             {
                 ch.videoFlowLabel = *v;
-            }
-            if (auto const v = env.get(key("MXL_AUDIO_FLOW_LABEL")))
-            {
-                ch.audioFlowLabel = *v;
             }
             if (auto const v = env.get(key("MXL_GROUP_HINT")))
             {
@@ -372,11 +486,13 @@ namespace mxldl::config
                 {"CH0_AUDIO_CHANNEL_COUNT", "AUDIO_CHANNEL_COUNT"},
                 {"CH0_AUDIO_SAMPLE_TYPE", "AUDIO_SAMPLE_TYPE"},
                 {"CH0_MXL_VIDEO_FLOW_ID", "MXL_VIDEO_FLOW_ID"},
-                {"CH0_MXL_AUDIO_FLOW_ID", "MXL_AUDIO_FLOW_ID"},
                 {"CH0_MXL_ANC_FLOW_ID", "MXL_ANC_FLOW_ID"},
                 {"CH0_MXL_VIDEO_FLOW_LABEL", "MXL_VIDEO_FLOW_LABEL"},
-                {"CH0_MXL_AUDIO_FLOW_LABEL", "MXL_AUDIO_FLOW_LABEL"},
                 {"CH0_MXL_GROUP_HINT", "MXL_GROUP_HINT"},
+                {"CH0_AF0_FLOW_ID", "AF0_FLOW_ID"},
+                {"CH0_AF0_CHANNEL_COUNT", "AF0_CHANNEL_COUNT"},
+                {"CH0_AF0_MAP", "AF0_MAP"},
+                {"CH0_AF0_LABEL", "AF0_LABEL"},
                 {"CH0_MXL_DEVICE_ID", "MXL_DEVICE_ID"},
                 {"CH0_MXL_SOURCE_ID", "MXL_SOURCE_ID"},
                 {"CH0_GRAIN_COUNT", "GRAIN_COUNT"},
@@ -428,6 +544,10 @@ namespace mxldl::config
             // the same container writes (loopback), so reader UUIDs are only
             // checked against other readers.
             auto checkUnique = [](std::set<std::string>& uuids, util::Uuid const& id, std::string const& what) {
+                if (id.isNil())
+                {
+                    return; // unassigned (outputs) — not a collision
+                }
                 if (!uuids.insert(id.toString()).second)
                 {
                     fail("duplicate flow UUID " + id.toString() + " (" + what + "); flow UUIDs must be unique per container");
@@ -440,9 +560,12 @@ namespace mxldl::config
                 auto& uuids = ch.direction == Direction::Input ? writerUuids : readerUuids;
                 std::string const chName = "channel " + std::to_string(ch.index);
                 checkUnique(uuids, ch.videoFlowId, chName + " video");
-                if (ch.audioFlowId)
+                for (auto const& af : ch.audioFlows)
                 {
-                    checkUnique(uuids, *ch.audioFlowId, chName + " audio");
+                    if (!af.flowId.isNil())
+                    {
+                        checkUnique(uuids, af.flowId, chName + " audio AF" + std::to_string(af.index));
+                    }
                 }
                 if (ch.ancFlowId)
                 {

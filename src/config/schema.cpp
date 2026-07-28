@@ -66,15 +66,21 @@ namespace mxldl::config
                     false},
                 {"ALLOW_FORMAT_CONVERSION", SettingKind::Channel, "bool", {}, "false", "Permit 8-bit → v210 expansion (§3.3).", false},
                 {"VIDEO_ANC_ENABLE", SettingKind::Channel, "bool", {}, "false", "Create an additional video/smpte291 ANC flow.", false},
-                {"AUDIO_ENABLE", SettingKind::Channel, "bool", {}, "true", "Enable the audio flow.", false},
-                {"AUDIO_CHANNEL_COUNT", SettingKind::Channel, "enum", {"2", "8", "16", "32", "64"}, "16", "DeckLink audio channel count.", false},
+                {"AUDIO_ENABLE", SettingKind::Channel, "bool", {}, "true", "Enable DeckLink audio and MXL audio flows.", false},
+                {"AUDIO_CHANNEL_COUNT", SettingKind::Channel, "enum", {"2", "8", "16", "32", "64"}, "16",
+                    "DeckLink interleaved PCM width (routing matrix source/sink size).", false},
                 {"AUDIO_SAMPLE_TYPE", SettingKind::Channel, "enum", {"16bit", "32bit"}, "32bit", "DeckLink audio sample type.", false},
                 {"MXL_VIDEO_FLOW_ID", SettingKind::Channel, "uuid", {}, "", "Video flow UUID (stable, managed externally).", false},
-                {"MXL_AUDIO_FLOW_ID", SettingKind::Channel, "uuid", {}, "", "Audio flow UUID (required when audio enabled).", false},
                 {"MXL_ANC_FLOW_ID", SettingKind::Channel, "uuid", {}, "", "ANC flow UUID (required when ANC enabled).", false},
                 {"MXL_VIDEO_FLOW_LABEL", SettingKind::Channel, "string", {}, "", "Human-readable video flow label.", false},
-                {"MXL_AUDIO_FLOW_LABEL", SettingKind::Channel, "string", {}, "", "Human-readable audio flow label.", false},
                 {"MXL_GROUP_HINT", SettingKind::Channel, "string", {}, "", "NMOS grouphint value (defaults to the channel label).", false},
+                // Audio-flow templates (§4.2): concrete keys are CHx_AFn_FLOW_ID etc.
+                {"FLOW_ID", SettingKind::AudioFlow, "uuid", {}, "",
+                    "MXL audio flow UUID. Nil UUID (00000000-…) means unassigned (outputs only).", false},
+                {"CHANNEL_COUNT", SettingKind::AudioFlow, "int", {}, "2", "MXL audio/float32 channel count for this flow (1–64).", false},
+                {"MAP", SettingKind::AudioFlow, "intlist", {}, "",
+                    "Comma-separated DeckLink channel indices (length = CHANNEL_COUNT) mapping into this flow.", false},
+                {"LABEL", SettingKind::AudioFlow, "string", {}, "", "Human-readable audio flow label.", false},
                 {"MXL_DEVICE_ID", SettingKind::Channel, "uuid", {}, "", "device_id in the flow descriptors.", false},
                 {"MXL_SOURCE_ID", SettingKind::Channel, "uuid", {}, "", "source_id in the flow descriptors.", false},
                 {"GRAIN_COUNT", SettingKind::Channel, "int", {}, "", "Requested video ring depth in grains (12 HD / 8 UHD default).", false},
@@ -115,10 +121,44 @@ namespace mxldl::config
         return std::make_pair(idx, std::string(key.substr(i + 1)));
     }
 
+    std::optional<std::pair<int, std::string>> parseAudioFlowSuffix(std::string_view suffix)
+    {
+        // AF<n>_<FIELD> with n in 0..15.
+        if (suffix.size() < 4 || suffix[0] != 'A' || suffix[1] != 'F')
+        {
+            return std::nullopt;
+        }
+        std::size_t i = 2;
+        int idx = 0;
+        bool haveDigit = false;
+        while (i < suffix.size() && suffix[i] >= '0' && suffix[i] <= '9')
+        {
+            idx = idx * 10 + (suffix[i] - '0');
+            haveDigit = true;
+            ++i;
+        }
+        if (!haveDigit || i >= suffix.size() || suffix[i] != '_' || idx > 15)
+        {
+            return std::nullopt;
+        }
+        return std::make_pair(idx, std::string(suffix.substr(i + 1)));
+    }
+
     std::optional<SettingMeta> lookupSetting(std::string_view key)
     {
         if (auto const ch = parseChannelKey(key))
         {
+            if (auto const af = parseAudioFlowSuffix(ch->second))
+            {
+                for (auto const& m : settingsSchema())
+                {
+                    if (m.kind == SettingKind::AudioFlow && m.key == af->second)
+                    {
+                        return m;
+                    }
+                }
+                return std::nullopt;
+            }
             for (auto const& m : settingsSchema())
             {
                 if (m.kind == SettingKind::Channel && m.key == ch->second)

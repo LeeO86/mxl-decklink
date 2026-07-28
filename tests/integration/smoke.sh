@@ -53,7 +53,9 @@ common_env() {
         CH0_AUDIO_CHANNEL_COUNT=2 \
         CH0_VIDEO_ANC_ENABLE=true \
         CH0_MXL_VIDEO_FLOW_ID=5fbec3b1-1b0f-417d-9059-8b94a47197ed \
-        CH0_MXL_AUDIO_FLOW_ID=b3bb5be7-9fe9-4324-a5bb-4c70e1084449 \
+        CH0_AF0_FLOW_ID=b3bb5be7-9fe9-4324-a5bb-4c70e1084449 \
+        CH0_AF0_CHANNEL_COUNT=2 \
+        CH0_AF0_MAP=0,1 \
         CH0_MXL_ANC_FLOW_ID=db3bd465-2772-484f-8fac-830b0471258b \
         CH0_LABEL=smoke-in \
         CH1_DIRECTION=output \
@@ -61,7 +63,9 @@ common_env() {
         CH1_VIDEO_MODE=HD720p50 \
         CH1_AUDIO_CHANNEL_COUNT=2 \
         CH1_MXL_VIDEO_FLOW_ID=5fbec3b1-1b0f-417d-9059-8b94a47197ed \
-        CH1_MXL_AUDIO_FLOW_ID=b3bb5be7-9fe9-4324-a5bb-4c70e1084449 \
+        CH1_AF0_FLOW_ID=b3bb5be7-9fe9-4324-a5bb-4c70e1084449 \
+        CH1_AF0_CHANNEL_COUNT=2 \
+        CH1_AF0_MAP=0,1 \
         CH1_LABEL=smoke-out \
         "$@"
 }
@@ -235,7 +239,9 @@ fc_env() {
         CH0_DIRECTION=input CH0_SUBDEVICE_INDEX=0 CH0_VIDEO_MODE=auto \
         CH0_AUDIO_CHANNEL_COUNT=2 \
         CH0_MXL_VIDEO_FLOW_ID=5fbec3b1-1b0f-417d-9059-8b94a47197ed \
-        CH0_MXL_AUDIO_FLOW_ID=b3bb5be7-9fe9-4324-a5bb-4c70e1084449 \
+        CH0_AF0_FLOW_ID=b3bb5be7-9fe9-4324-a5bb-4c70e1084449 \
+        CH0_AF0_CHANNEL_COUNT=2 \
+        CH0_AF0_MAP=0,1 \
         CH0_LABEL=smoke-fc \
         "$BIN"
 }
@@ -288,7 +294,9 @@ web_env() {
         CH0_DIRECTION=input CH0_SUBDEVICE_INDEX=0 CH0_VIDEO_MODE=HD720p50 \
         CH0_AUDIO_CHANNEL_COUNT=2 \
         CH0_MXL_VIDEO_FLOW_ID=5fbec3b1-1b0f-417d-9059-8b94a47197ed \
-        CH0_MXL_AUDIO_FLOW_ID=b3bb5be7-9fe9-4324-a5bb-4c70e1084449 \
+        CH0_AF0_FLOW_ID=b3bb5be7-9fe9-4324-a5bb-4c70e1084449 \
+        CH0_AF0_CHANNEL_COUNT=2 \
+        CH0_AF0_MAP=0,1 \
         CH0_LABEL=smoke-web-in \
         "$BIN"
 }
@@ -306,6 +314,17 @@ curl -s --max-time 3 "http://127.0.0.1:$WEB_PORT/metrics" | grep -q mxl_decklink
     || fail "/metrics not on WEB_PORT"
 state=$(webapi /api/status | python3 -c "import json,sys; print(json.load(sys.stdin)['channels'][0]['state'])") || state=err
 [[ "$state" == "healthy" ]] || fail "web /api/status channel state: $state"
+webapi /api/status | python3 -c "
+import json,sys
+c = json.load(sys.stdin)['channels'][0]
+a = c.get('audio') or {}
+assert a.get('enabled') is True, a
+assert a.get('deck_channel_count') == 2, a
+assert len(a.get('flows') or []) == 1, a
+assert a['flows'][0]['channel_count'] == 2, a
+assert a['flows'][0]['map'] == [0, 1], a
+assert a['flows'][0].get('mxl_present') is True, a
+" || fail "web /api/status missing audio overview"
 
 # Card status includes the detected input mode from the mock.
 detected=$(webapi /api/card | python3 -c "import json,sys; print(json.load(sys.stdin)['subdevices'][0]['status']['detected_input_mode'])") || detected=err
@@ -328,7 +347,7 @@ curl -s --max-time 5 -X POST "http://127.0.0.1:$WEB_PORT/api/domains" \
 curl -s --max-time 5 -X PUT "http://127.0.0.1:$WEB_PORT/api/config" -d '{
     "set": {"CH1_DIRECTION":"output","CH1_SUBDEVICE_INDEX":"0","CH1_VIDEO_MODE":"HD720p50",
             "CH1_AUDIO_CHANNEL_COUNT":"2","CH1_MXL_VIDEO_FLOW_ID":"5fbec3b1-1b0f-417d-9059-8b94a47197ed",
-            "CH1_MXL_AUDIO_FLOW_ID":"b3bb5be7-9fe9-4324-a5bb-4c70e1084449","CH1_LABEL":"smoke-web-out"}}' \
+            "CH1_AF0_FLOW_ID":"b3bb5be7-9fe9-4324-a5bb-4c70e1084449","CH1_AF0_CHANNEL_COUNT":"2","CH1_AF0_MAP":"0,1","CH1_LABEL":"smoke-web-out"}}' \
     | grep -q '"channels_added":\[1\]' || fail "live channel add via /api/config failed"
 sleep 3
 out_state=$(webapi /api/status | python3 -c "

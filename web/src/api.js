@@ -23,7 +23,63 @@ export const api = {
   post: (path, body) => request(path, { method: "POST", body: JSON.stringify(body) }),
 };
 
+export const NIL_UUID = "00000000-0000-0000-0000-000000000000";
+
 export const chKey = (idx, suffix) => `CH${idx}_${suffix}`;
+export const afKey = (chIdx, afIdx, field) => `CH${chIdx}_AF${afIdx}_${field}`;
+
+export function newUuid() {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+  // Fallback for older browsers / non-secure contexts.
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+/** Contiguous AF indices present for a channel (draft or config values). */
+export function audioFlowIndices(draftOrValues, chIdx) {
+  const keys = draftOrValues && typeof draftOrValues === "object"
+    ? (draftOrValues.values ? Object.keys(draftOrValues.values) : Object.keys(draftOrValues))
+    : [];
+  const set = new Set();
+  const re = new RegExp(`^CH${chIdx}_AF(\\d+)_FLOW_ID$`);
+  for (const k of keys) {
+    const m = k.match(re);
+    if (m) set.add(Number(m[1]));
+  }
+  // Contiguous from 0.
+  const out = [];
+  for (let i = 0; i < 16; ++i) {
+    if (!set.has(i)) break;
+    out.push(i);
+  }
+  return out;
+}
+
+export function identityMap(count) {
+  return [...Array(Math.max(0, count)).keys()].join(",");
+}
+
+/** Grouphint Studio-A + channel index 0 → Studio-A-1 */
+export function suggestChannelLabel(groupHint, chIdx) {
+  const hint = (groupHint || "").trim();
+  if (!hint) return `ch${chIdx}`;
+  return `${hint}-${chIdx + 1}`;
+}
+
+export function suggestVideoFlowLabel(channelLabel) {
+  return `${channelLabel}-video1`;
+}
+
+export function suggestAudioFlowLabel(channelLabel, afIdx) {
+  return `${channelLabel}-audio${afIdx + 1}`;
+}
+
+export function suggestAncFlowLabel(channelLabel) {
+  return `${channelLabel}-anc1`;
+}
 
 export function channelIndices(config) {
   const idx = new Set();
@@ -38,6 +94,8 @@ export const valueOf = (config, key) => config.values[key]?.value ?? null;
 export const sourceOf = (config, key) => config.values[key]?.source ?? "default";
 export const channelMeta = (config, suffix) =>
   config.schema.find((m) => m.kind === "channel" && m.key === suffix);
+export const audioFlowMeta = (config, field) =>
+  config.schema.find((m) => m.kind === "audio_flow" && m.key === field);
 
 // Derives the §3.2.1 mode name from flow geometry for flow→output assignment.
 export function modeNameForFlow(flow, options) {

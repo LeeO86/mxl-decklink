@@ -61,6 +61,19 @@ namespace mxldl::config
         HostMount,
     };
 
+    /// One MXL audio/float32 flow fed from (or feeding into) a subset of the
+    /// DeckLink interleaved PCM via `deckLinkChannels` (routing matrix row).
+    struct AudioFlowConfig
+    {
+        int index = 0; // n in CHx_AFn_
+        util::Uuid flowId{}; // nil UUID = unassigned (outputs only)
+        int channelCount = 2; // MXL flow channel count (1..64)
+        std::vector<int> deckLinkChannels; // size == channelCount; DeckLink indices
+        std::string label;
+
+        bool operator==(AudioFlowConfig const&) const = default;
+    };
+
     struct ChannelConfig
     {
         int index = 0; // the x in CHx_
@@ -72,14 +85,13 @@ namespace mxldl::config
         bool allowFormatConversion = false;
         bool ancEnable = false;
         bool audioEnable = true;
-        int audioChannelCount = 16;
+        int audioChannelCount = 16; // DeckLink interleaved width
         AudioSampleType audioSampleType = AudioSampleType::Int32;
 
         util::Uuid videoFlowId{};
-        std::optional<util::Uuid> audioFlowId;
+        std::vector<AudioFlowConfig> audioFlows;
         std::optional<util::Uuid> ancFlowId;
         std::string videoFlowLabel; // defaulted at validation
-        std::string audioFlowLabel;
         std::string groupHint;
         std::optional<util::Uuid> deviceId;
         std::optional<util::Uuid> sourceId;

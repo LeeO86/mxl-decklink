@@ -45,6 +45,12 @@ namespace mxldl::channel
         void housekeeping();
 
     private:
+        struct AudioFlowReader
+        {
+            config::AudioFlowConfig cfg;
+            std::unique_ptr<mxlbridge::AudioReader> reader; // null when flow UUID is nil
+        };
+
         void supervisorLoop();
         bool bringUp();
         void tearDownStreaming();
@@ -62,7 +68,7 @@ namespace mxldl::channel
         Status _status;
         std::unique_ptr<dl::IPlaybackSession> _playback;
         std::unique_ptr<mxlbridge::VideoReader> _videoReader;
-        std::unique_ptr<mxlbridge::AudioReader> _audioReader;
+        std::vector<AudioFlowReader> _audioFlows;
 
         config::VideoMode _mode{};
         std::atomic<bool> _playing{false};
@@ -73,7 +79,10 @@ namespace mxldl::channel
         std::uint64_t _nextGrainIndex = 0;
         std::uint64_t _scheduledFrames = 0;
         std::vector<std::uint8_t> _lastFrame; // repeated on reader timeout
-        std::vector<std::uint8_t> _audioScratch;
+        // Int32-aligned PCM scratch (DeckLink sample type is usually 32-bit;
+        // Int16 uses a parallel buffer to avoid misaligned casts).
+        std::vector<std::int32_t> _audioScratchInt32;
+        std::vector<std::int16_t> _audioScratchInt16;
         std::uint64_t _nextAudioEndIndex = 0;
         std::size_t _samplesPerFrame = 0;
 

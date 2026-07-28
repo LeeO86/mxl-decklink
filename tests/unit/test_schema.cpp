@@ -58,4 +58,30 @@ TEST_CASE("schema covers every §4.1/§4.2 key the loader understands")
         CAPTURE(suffix);
         CHECK(lookupSetting(std::string("CH7_") + suffix).has_value());
     }
+    for (auto const* af : {"CH0_AF0_FLOW_ID", "CH0_AF3_CHANNEL_COUNT", "CH15_AF15_MAP", "CH1_AF0_LABEL"})
+    {
+        CAPTURE(af);
+        auto const m = lookupSetting(af);
+        REQUIRE(m.has_value());
+        CHECK(m->kind == SettingKind::AudioFlow);
+    }
+    CHECK_FALSE(lookupSetting("CH0_MXL_AUDIO_FLOW_ID").has_value());
+    CHECK_FALSE(lookupSetting("CH0_AF16_FLOW_ID").has_value());
+}
+
+TEST_CASE("audio flow suffix parsing")
+{
+    auto const p = parseAudioFlowSuffix("AF0_FLOW_ID");
+    REQUIRE(p.has_value());
+    CHECK(p->first == 0);
+    CHECK(p->second == "FLOW_ID");
+
+    auto const p15 = parseAudioFlowSuffix("AF15_MAP");
+    REQUIRE(p15.has_value());
+    CHECK(p15->first == 15);
+    CHECK(p15->second == "MAP");
+
+    CHECK_FALSE(parseAudioFlowSuffix("AF16_FLOW_ID").has_value());
+    CHECK_FALSE(parseAudioFlowSuffix("FLOW_ID").has_value());
+    CHECK_FALSE(parseAudioFlowSuffix("AFx_FLOW_ID").has_value());
 }

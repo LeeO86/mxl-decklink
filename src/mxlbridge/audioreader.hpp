@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstdint>
+#include <span>
 #include <string>
 
 #include <mxl/flow.h>
@@ -23,11 +24,11 @@ namespace mxldl::mxlbridge
         AudioReader(AudioReader const&) = delete;
         AudioReader& operator=(AudioReader const&) = delete;
 
-        /// Reads `sampleFrames` float32 samples per channel ending at
-        /// `endIndex` and interleaves them into integer PCM for the DeckLink
-        /// API. `dst` must hold sampleFrames × deckLinkChannels samples.
+        /// Reads `sampleFrames` float32 samples per flow channel ending at
+        /// `endIndex` and merges them into interleaved DeckLink PCM via
+        /// `channelMap` (MXL ch → DeckLink ch). Does not clear `dst`.
         mxlStatus readSamples(std::uint64_t endIndex, std::size_t sampleFrames, std::uint64_t timeoutNs, void* dst, std::size_t deckLinkChannels,
-            config::AudioSampleType sampleType);
+            std::span<int const> channelMap, config::AudioSampleType sampleType);
 
         [[nodiscard]] std::uint32_t channelCount() const
         {

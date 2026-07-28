@@ -33,7 +33,7 @@ namespace mxldl::mxlbridge
     }
 
     mxlStatus AudioReader::readSamples(std::uint64_t endIndex, std::size_t sampleFrames, std::uint64_t timeoutNs, void* dst,
-        std::size_t deckLinkChannels, config::AudioSampleType sampleType)
+        std::size_t deckLinkChannels, std::span<int const> channelMap, config::AudioSampleType sampleType)
     {
         mxlWrappedMultiBufferSlice slices{};
         auto const status = ::mxlFlowReaderGetSamples(_reader, endIndex, sampleFrames, timeoutNs, &slices);
@@ -43,11 +43,11 @@ namespace mxldl::mxlbridge
         }
         if (sampleType == config::AudioSampleType::Int32)
         {
-            util::interleaveFloatToInt32(slices, sampleFrames, deckLinkChannels, static_cast<std::int32_t*>(dst));
+            util::interleaveFloatToInt32Mapped(slices, sampleFrames, channelMap, deckLinkChannels, static_cast<std::int32_t*>(dst));
         }
         else
         {
-            util::interleaveFloatToInt16(slices, sampleFrames, deckLinkChannels, static_cast<std::int16_t*>(dst));
+            util::interleaveFloatToInt16Mapped(slices, sampleFrames, channelMap, deckLinkChannels, static_cast<std::int16_t*>(dst));
         }
         return MXL_STATUS_OK;
     }

@@ -179,6 +179,20 @@ namespace mxldl::config
                     keys[meta.key] = true;
                 }
             }
+            else if (meta.kind == SettingKind::AudioFlow)
+            {
+                for (int i = 0; i < 16; ++i)
+                {
+                    for (int af = 0; af < 16; ++af)
+                    {
+                        auto const key = "CH" + std::to_string(i) + "_AF" + std::to_string(af) + "_" + meta.key;
+                        if (auto const v = _env(key); v && !v->empty())
+                        {
+                            keys[key] = true;
+                        }
+                    }
+                }
+            }
             else
             {
                 for (int i = 0; i < 16; ++i)
