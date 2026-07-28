@@ -219,6 +219,8 @@ namespace mxldl::channel
                 v.framesDropped = status->framesDropped.load();
                 v.reconnects = status->reconnects.load();
                 v.grainsCommitted = status->grainsCommitted.load();
+                v.bufferedAudioFrames = status->bufferedAudioFrames.load();
+                v.bufferedVideoFrames = status->bufferedVideoFrames.load();
                 v.activeVideoFlowId = status->activeVideoFlowId();
                 v.activeModeName = status->activeModeName();
             }

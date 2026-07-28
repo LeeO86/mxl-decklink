@@ -352,7 +352,7 @@ The container exposes a **single consolidated HTTP port** `WEB_PORT` (default 80
 
 - **`/livez`** returns **200 OK** as long as the process is alive and the housekeeping thread has been active within the last 5 seconds. On deadlock or total failure it times out → Kubernetes kills the pod.
 - **`/readyz`** returns **200 OK** exactly when at least `MXL_HEALTH_MIN_HEALTHY_CHANNELS` channels are in state `healthy`. Below the threshold it returns **503 Service Unavailable** with a JSON body listing per-channel state. Default threshold is 1; for critical broadcast setups set it to the total configured channel count — "ready" then strictly means "all channels up".
-- **`/statusz`** always returns **200 OK** with a full JSON report: per channel its state, last frame timestamp, signal lock, frame drops, reconnect counter, MXL grain commit count.
+- **`/statusz`** always returns **200 OK** with a full JSON report: per channel its state, last frame timestamp, signal lock, frame drops, reconnect counter, MXL grain commit count, and an `audio` summary (enable, DeckLink width, per-AF map/UUID, output buffered audio sample frames when available).
 - **`/metrics`** serves Prometheus text format.
 - When `WEB_ENABLE=true` (default): the embedded web UI (`/`) and the `/api/…` REST API (§7.5). When `WEB_ENABLE=false`, UI and mutating API are absent; health and metrics remain.
 
@@ -412,7 +412,7 @@ The web interface implements **no authentication** — like the health and metri
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/api/status` | GET | Dashboard summary (process, card, channels, domain) |
+| `/api/status` | GET | Dashboard summary (process, card, channels, domain). Each channel includes an `audio` object: enable/DeckLink width/sample type, `flows[]` (AF index, map, label, UUID), MXL join (`mxl_active` / `mxl_head_index` from the domain), and for outputs `decklink_buffered_audio_frames` (`IDeckLinkOutput::GetBufferedAudioSampleFrameCount`). |
 | `/api/card` | GET | Card + per-sub-device capabilities and live SDK status |
 | `/api/config` | GET | All settings with value, provenance, editability, env-var name |
 | `/api/config` | PUT | Partial update `{key: value \| null}`; validates, persists, applies; reports `restart_required` |

@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <sstream>
 #include <system_error>
+#include <unordered_map>
 
 #include <picojson/picojson.h>
 
@@ -43,6 +44,87 @@ namespace mxldl::ops
         HttpResponse jsonError(int status, std::string const& message)
         {
             return jsonResponse(status, "{\"error\":" + jstr(message) + "}");
+        }
+
+        char const* audioSampleTypeName(config::AudioSampleType t)
+        {
+            return t == config::AudioSampleType::Int16 ? "16bit" : "32bit";
+        }
+
+        /// Appends the channel `audio` object: config matrix + DeckLink buffer
+        /// (outputs) + optional MXL domain runtime (active / head_index).
+        void appendAudioJson(std::ostringstream& out, channel::ChannelManager::ChannelView const& v,
+            std::unordered_map<std::string, mxlbridge::FlowSummary> const* flowById)
+        {
+            out << ",\"audio\":{";
+            out << "\"enabled\":" << (v.cfg.audioEnable ? "true" : "false");
+            out << ",\"deck_channel_count\":" << v.cfg.audioChannelCount;
+            out << ",\"sample_type\":" << jstr(audioSampleTypeName(v.cfg.audioSampleType));
+            if (v.cfg.direction == config::Direction::Output)
+            {
+                out << ",\"decklink_buffered_audio_frames\":" << v.bufferedAudioFrames;
+                out << ",\"decklink_buffered_video_frames\":" << v.bufferedVideoFrames;
+            }
+            else
+            {
+                out << ",\"decklink_buffered_audio_frames\":null";
+                out << ",\"decklink_buffered_video_frames\":null";
+            }
+            out << ",\"flows\":[";
+            bool firstFlow = true;
+            for (auto const& af : v.cfg.audioFlows)
+            {
+                if (!firstFlow)
+                {
+                    out << ",";
+                }
+                firstFlow = false;
+                bool const unassigned = af.flowId.isNil();
+                out << "{\"index\":" << af.index;
+                out << ",\"flow_id\":" << jstr(af.flowId.toString());
+                out << ",\"channel_count\":" << af.channelCount;
+                out << ",\"label\":" << jstr(af.label);
+                out << ",\"unassigned\":" << (unassigned ? "true" : "false");
+                out << ",\"map\":[";
+                for (std::size_t i = 0; i < af.deckLinkChannels.size(); ++i)
+                {
+                    if (i > 0)
+                    {
+                        out << ",";
+                    }
+                    out << af.deckLinkChannels[i];
+                }
+                out << "]";
+                if (!unassigned && flowById != nullptr)
+                {
+                    auto const it = flowById->find(af.flowId.toString());
+                    if (it != flowById->end())
+                    {
+                        out << ",\"mxl_present\":true";
+                        out << ",\"mxl_active\":" << (it->second.active ? "true" : "false");
+                        out << ",\"mxl_head_index\":" << jnum(it->second.headIndex);
+                        out << ",\"mxl_last_write_time_ns\":" << jnum(it->second.lastWriteTimeNs);
+                        if (it->second.channelCount)
+                        {
+                            out << ",\"mxl_channel_count\":" << *it->second.channelCount;
+                        }
+                        else
+                        {
+                            out << ",\"mxl_channel_count\":null";
+                        }
+                    }
+                    else
+                    {
+                        out << ",\"mxl_present\":false,\"mxl_active\":false,\"mxl_head_index\":null,\"mxl_last_write_time_ns\":null,\"mxl_channel_count\":null";
+                    }
+                }
+                else
+                {
+                    out << ",\"mxl_present\":false,\"mxl_active\":false,\"mxl_head_index\":null,\"mxl_last_write_time_ns\":null,\"mxl_channel_count\":null";
+                }
+                out << "}";
+            }
+            out << "]}";
         }
     }
 
@@ -170,6 +252,18 @@ namespace mxldl::ops
 
         out << ",\"channels\":[";
         bool first = true;
+        std::unordered_map<std::string, mxlbridge::FlowSummary> flowById;
+        try
+        {
+            for (auto const& f : mxlbridge::listFlows(_domain.path()))
+            {
+                flowById.emplace(f.id, f);
+            }
+        }
+        catch (...)
+        {
+            // Domain may be empty / inaccessible during bring-up; omit MXL join.
+        }
         for (auto const& v : _channels.channels())
         {
             if (!first)
@@ -183,7 +277,9 @@ namespace mxldl::ops
                 << ",\"active_video_mode\":" << jstr(v.activeModeName) << ",\"video_mode_setting\":" << jstr(v.cfg.videoModeName)
                 << ",\"active_video_flow_id\":" << jstr(v.activeVideoFlowId) << ",\"frames_total\":" << v.framesTotal
                 << ",\"frames_dropped\":" << v.framesDropped << ",\"reconnects\":" << v.reconnects << ",\"grains_committed\":" << v.grainsCommitted
-                << ",\"last_frame_tai_ns\":" << v.lastFrameTaiNs << "}";
+                << ",\"last_frame_tai_ns\":" << v.lastFrameTaiNs;
+            appendAudioJson(out, v, &flowById);
+            out << "}";
         }
         out << "]}";
         return jsonResponse(200, out.str());

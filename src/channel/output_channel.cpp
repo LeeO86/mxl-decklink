@@ -480,7 +480,10 @@ namespace mxldl::channel
             return;
         }
         _bufferedVideoGauge->set(static_cast<double>(_playback->bufferedVideoFrames()));
-        _bufferedAudioGauge->set(static_cast<double>(_playback->bufferedAudioFrames()));
+        auto const audioBuffered = _playback->bufferedAudioFrames();
+        _bufferedAudioGauge->set(static_cast<double>(audioBuffered));
+        _status.bufferedVideoFrames.store(_playback->bufferedVideoFrames());
+        _status.bufferedAudioFrames.store(audioBuffered);
         _status.signalLocked.store(_playback->referenceLocked());
 
         auto const head = _videoReader->headIndex();

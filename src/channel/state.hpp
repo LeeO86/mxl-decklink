@@ -42,6 +42,11 @@ namespace mxldl::channel
         std::atomic<std::uint64_t> framesDropped{0};
         std::atomic<std::uint64_t> reconnects{0};
         std::atomic<std::uint64_t> grainsCommitted{0};
+        /// Output only: DeckLink `GetBufferedAudioSampleFrameCount` (sample
+        /// frames, not bytes). Zero on inputs / when not streaming.
+        std::atomic<std::uint32_t> bufferedAudioFrames{0};
+        /// Output only: DeckLink buffered video frame count.
+        std::atomic<std::uint32_t> bufferedVideoFrames{0};
 
         // §3.8: the currently active video flow UUID (may differ from the
         // configured one after a format change). Guarded by a mutex — read

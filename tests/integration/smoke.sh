@@ -314,6 +314,17 @@ curl -s --max-time 3 "http://127.0.0.1:$WEB_PORT/metrics" | grep -q mxl_decklink
     || fail "/metrics not on WEB_PORT"
 state=$(webapi /api/status | python3 -c "import json,sys; print(json.load(sys.stdin)['channels'][0]['state'])") || state=err
 [[ "$state" == "healthy" ]] || fail "web /api/status channel state: $state"
+webapi /api/status | python3 -c "
+import json,sys
+c = json.load(sys.stdin)['channels'][0]
+a = c.get('audio') or {}
+assert a.get('enabled') is True, a
+assert a.get('deck_channel_count') == 2, a
+assert len(a.get('flows') or []) == 1, a
+assert a['flows'][0]['channel_count'] == 2, a
+assert a['flows'][0]['map'] == [0, 1], a
+assert a['flows'][0].get('mxl_present') is True, a
+" || fail "web /api/status missing audio overview"
 
 # Card status includes the detected input mode from the mock.
 detected=$(webapi /api/card | python3 -c "import json,sys; print(json.load(sys.stdin)['subdevices'][0]['status']['detected_input_mode'])") || detected=err

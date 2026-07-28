@@ -57,6 +57,8 @@ namespace mxldl::channel
             std::uint64_t framesDropped = 0;
             std::uint64_t reconnects = 0;
             std::uint64_t grainsCommitted = 0;
+            std::uint32_t bufferedAudioFrames = 0;
+            std::uint32_t bufferedVideoFrames = 0;
             std::string activeVideoFlowId;
             std::string activeModeName;
         };
