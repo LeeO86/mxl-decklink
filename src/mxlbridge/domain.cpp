@@ -11,10 +11,18 @@ namespace mxldl::mxlbridge
     Domain::Domain(std::string domainPath)
         : _path(std::move(domainPath))
     {
-        // §4.1: the domain directory is expected to be mounted, not created.
+        // Create the directory when missing so a first deploy can start with
+        // only defaults (operators still should put it on tmpfs).
         if (!std::filesystem::is_directory(_path))
         {
-            throw std::runtime_error("MXL domain path does not exist or is not a directory: " + _path);
+            std::error_code ec;
+            std::filesystem::create_directories(_path, ec);
+            if (ec || !std::filesystem::is_directory(_path))
+            {
+                throw std::runtime_error("MXL domain path does not exist and could not be created: " + _path +
+                                         (ec ? (" (" + ec.message() + ")") : ""));
+            }
+            log::info("mxl_domain_directory_created", {{"path", _path}});
         }
 
         bool isTmpfs = false;
