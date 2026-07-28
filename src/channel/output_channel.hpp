@@ -79,7 +79,10 @@ namespace mxldl::channel
         std::uint64_t _nextGrainIndex = 0;
         std::uint64_t _scheduledFrames = 0;
         std::vector<std::uint8_t> _lastFrame; // repeated on reader timeout
-        std::vector<std::uint8_t> _audioScratch;
+        // Int32-aligned PCM scratch (DeckLink sample type is usually 32-bit;
+        // Int16 uses a parallel buffer to avoid misaligned casts).
+        std::vector<std::int32_t> _audioScratchInt32;
+        std::vector<std::int16_t> _audioScratchInt16;
         std::uint64_t _nextAudioEndIndex = 0;
         std::size_t _samplesPerFrame = 0;
 

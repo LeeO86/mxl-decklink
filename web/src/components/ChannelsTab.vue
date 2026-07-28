@@ -284,9 +284,12 @@ async function save(idx, isNew) {
 async function remove(idx) {
   if (!confirm(`Remove channel ${idx}?`)) return;
   const unset = [];
-  for (const key of allKeys(idx)) {
+  for (const suffix of CH_FIELD_ORDER) {
+    const key = chKey(idx, suffix);
     if (sourceOf(config.value, key) === "file") unset.push(key);
   }
+  // Unset every possible AF slot once (contiguous discovery stops at gaps,
+  // but file may still hold higher indices from earlier edits).
   for (let af = 0; af < 16; ++af) {
     for (const field of AF_FIELDS) {
       const key = afKey(idx, af, field);

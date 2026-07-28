@@ -431,9 +431,20 @@ namespace mxldl::channel
         std::lock_guard const lock{_scheduleMutex};
         _nextAudioEndIndex += _samplesPerFrame;
         auto const deckChannels = static_cast<std::size_t>(_cfg.audioChannelCount);
-        auto const bytesPerSample = _cfg.audioSampleType == config::AudioSampleType::Int32 ? 4u : 2u;
-        _audioScratch.assign(_samplesPerFrame * deckChannels * bytesPerSample, 0); // silence for unmapped / nil flows
         auto const timeoutNs = static_cast<std::uint64_t>(_cfg.readerTimeoutMs) * 1'000'000ULL;
+        auto const sampleCount = _samplesPerFrame * deckChannels;
+
+        void* pcm = nullptr;
+        if (_cfg.audioSampleType == config::AudioSampleType::Int32)
+        {
+            _audioScratchInt32.assign(sampleCount, 0);
+            pcm = _audioScratchInt32.data();
+        }
+        else
+        {
+            _audioScratchInt16.assign(sampleCount, 0);
+            pcm = _audioScratchInt16.data();
+        }
 
         bool anyOk = false;
         bool tooEarly = false;
@@ -443,8 +454,8 @@ namespace mxldl::channel
             {
                 continue; // nil UUID → leave mapped channels silent
             }
-            auto const status = af.reader->readSamples(_nextAudioEndIndex, _samplesPerFrame, timeoutNs, _audioScratch.data(), deckChannels,
-                af.cfg.deckLinkChannels, _cfg.audioSampleType);
+            auto const status =
+                af.reader->readSamples(_nextAudioEndIndex, _samplesPerFrame, timeoutNs, pcm, deckChannels, af.cfg.deckLinkChannels, _cfg.audioSampleType);
             if (status == MXL_STATUS_OK)
             {
                 anyOk = true;
@@ -457,7 +468,7 @@ namespace mxldl::channel
 
         if (anyOk)
         {
-            _playback->scheduleAudio(_audioScratch.data(), static_cast<std::uint32_t>(_samplesPerFrame));
+            _playback->scheduleAudio(pcm, static_cast<std::uint32_t>(_samplesPerFrame));
         }
         else if (tooEarly)
         {
@@ -469,7 +480,7 @@ namespace mxldl::channel
         {
             // All assigned readers failed (or only nil slots): still schedule
             // silence so DeckLink audio clock stays filled.
-            _playback->scheduleAudio(_audioScratch.data(), static_cast<std::uint32_t>(_samplesPerFrame));
+            _playback->scheduleAudio(pcm, static_cast<std::uint32_t>(_samplesPerFrame));
         }
     }
 

@@ -15,7 +15,12 @@ const props = defineProps({
 const model = defineModel({ type: String, default: "" });
 
 const disabled = computed(() => props.source === "env" || !props.editable);
-const fieldKey = computed(() => props.meta?.key || props.displayKey.split("_").pop());
+// Prefer schema key; otherwise keep CHx_ / CHx_AFn_ suffix (FLOW_ID, CHANNEL_COUNT, …).
+const fieldKey = computed(() => {
+  if (props.meta?.key) return props.meta.key;
+  const m = props.displayKey.match(/^CH\d+_(?:AF\d+_)?(.+)$/);
+  return m ? m[1] : props.displayKey;
+});
 const isSelect = computed(
   () => props.meta && (props.meta.type === "enum" || props.meta.type === "bool" || props.meta.key === "SUBDEVICE_INDEX")
 );
