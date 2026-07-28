@@ -42,6 +42,6 @@ const unsetLabel = computed(() => (props.meta?.default ? `(default: ${props.meta
       <option v-if="!required" value="">{{ unsetLabel }}</option>
       <option v-for="o in options" :key="o.value" :value="o.value">{{ o.label }}</option>
     </select>
-    <input v-else v-model="model" :placeholder="meta.default || ''" :disabled="disabled" />
+    <input v-else v-model="model" :placeholder="meta?.default || ''" :disabled="disabled" />
   </div>
 </template>
