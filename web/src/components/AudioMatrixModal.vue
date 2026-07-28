@@ -18,15 +18,22 @@ const emit = defineEmits(["close", "apply"]);
 
 const isOutput = computed(() => props.direction === "output");
 
-const deckCols = computed(() =>
-  [...Array(Math.max(0, props.deckChannelCount)).keys()]
-);
+/** Safe integer length for Array(...) — clamps NaN/floats/negatives. */
+function safeCount(value, { min = 0, max = 64, fallback = 0 } = {}) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, Math.trunc(n)));
+}
+
+const deckWidth = computed(() => safeCount(props.deckChannelCount, { min: 0, max: 64, fallback: 16 }));
+
+const deckCols = computed(() => [...Array(deckWidth.value).keys()]);
 
 /** Flattened rows: one per (flow, flowChannel). */
 const rows = computed(() => {
   const out = [];
   for (const f of props.flows) {
-    const count = Math.max(1, Number(f.channelCount) || 1);
+    const count = safeCount(f.channelCount, { min: 1, max: 64, fallback: 1 });
     const map = Array.isArray(f.map) ? f.map : [];
     for (let fc = 0; fc < count; ++fc) {
       out.push({
@@ -65,10 +72,11 @@ function cellClass(row, dl) {
 
 function pick(row, dl) {
   if (!props.editable) return;
+  const width = deckWidth.value;
   // Working copy of maps keyed by flow index.
   const byFlow = new Map();
   for (const f of props.flows) {
-    const count = Math.max(1, Number(f.channelCount) || 1);
+    const count = safeCount(f.channelCount, { min: 1, max: 64, fallback: 1 });
     const map = Array.isArray(f.map) ? [...f.map] : [];
     while (map.length < count) map.push(0);
     byFlow.set(f.index, map.slice(0, count));
@@ -77,8 +85,7 @@ function pick(row, dl) {
   if (!map) return;
 
   if (map[row.flowChannel] === dl) {
-    // Toggle off → leave a placeholder 0 (engineer can re-pick); keep length.
-    // Prefer next free column when clearing would leave a duplicate on output.
+    // Toggle off → leave a placeholder; keep length.
     map[row.flowChannel] = -1;
   } else {
     map[row.flowChannel] = dl;
@@ -106,8 +113,8 @@ function pick(row, dl) {
     for (let i = 0; i < m.length; ++i) {
       if (m[i] < 0) {
         let next = 0;
-        while (used.has(next) && next < props.deckChannelCount) next++;
-        if (next >= props.deckChannelCount) next = Math.min(i, props.deckChannelCount - 1);
+        while (used.has(next) && next < width) next++;
+        if (next >= width) next = Math.min(i, Math.max(0, width - 1));
         m[i] = next;
         used.add(next);
       }
