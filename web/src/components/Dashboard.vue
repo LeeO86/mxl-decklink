@@ -43,14 +43,16 @@ function flowMxlPill(f) {
 }
 
 function signalLabel(c) {
+  // Outputs have no input signal lock — signal_locked is genlock/reference only
+  // (also shown on Card). Don't paint free-run as a red failure.
   if (c.direction === "output") {
     return c.signal_locked
-      ? { text: "ref locked", kind: "on" }
-      : { text: "no ref", kind: "off" };
+      ? { text: "genlocked", kind: "on", title: "Reference / genlock locked" }
+      : { text: "free-run", kind: "init", title: "No reference lock (normal for many IP/SDI outputs)" };
   }
   return c.signal_locked
-    ? { text: "locked", kind: "on" }
-    : { text: "no signal", kind: "off" };
+    ? { text: "locked", kind: "on", title: "Input signal locked" }
+    : { text: "no signal", kind: "off", title: "No input signal" };
 }
 
 const audioRows = computed(() => {
@@ -130,7 +132,7 @@ onUnmounted(() => clearInterval(timer));
             <td>{{ c.subdevice_index }}</td>
             <td><Pill :text="c.state" :kind="c.state" /></td>
             <td>{{ c.active_video_mode || c.video_mode_setting }}</td>
-            <td>
+            <td :title="signalLabel(c).title">
               <Pill :text="signalLabel(c).text" :kind="signalLabel(c).kind" />
             </td>
             <td>
