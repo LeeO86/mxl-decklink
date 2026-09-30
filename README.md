@@ -36,9 +36,9 @@ MXL v1.1 API rather than the spec's paraphrase of it).
   `restart_required`. Unauthenticated by design — keep it on protected
   networks or set `WEB_ENABLE=false` (health/metrics remain). Structured JSON
   logging.
-- **NMOS (optional build)**: with `-DMXL_DECKLINK_NMOS=ON` and `NMOS_ENABLE=true`
-  the process is an AMWA IS-04 v1.3 / IS-05 v1.2 node for MXL
-  ([BCP-007-03](https://specs.amwa.tv/bcp-007-03/)). Input channels are MXL
+- **NMOS**: the container image and CI link Sony nmos-cpp. With
+  `NMOS_ENABLE=true` the process is an AMWA IS-04 v1.3 / IS-05 v1.2 node for
+  MXL ([BCP-007-03](https://specs.amwa.tv/bcp-007-03/)). Input channels are MXL
   senders, output channels are MXL receivers (`urn:x-nmos:transport:mxl`).
   A controller connects them with `mxl_domain_id` and `mxl_flow_id`; there is
   no SDP. This is separate from a DeckLink IP card's own ST 2110 NMOS node.
@@ -73,10 +73,12 @@ cmake --build build -j
 
 ### NMOS node (BCP-007-03)
 
-The NMOS node links [sony/nmos-cpp](https://github.com/sony/nmos-cpp) `master`
-(the tree that contains the MXL transport; the older Conan Center package does
-not). Dependencies are Boost, the C++ REST SDK, OpenSSL, and Avahi's
-`libdns_sd` compatibility library. Pass the `Development` directory:
+The published image and CI already link this in. A local build opts in the
+same way. It links [sony/nmos-cpp](https://github.com/sony/nmos-cpp) at the
+commit in `docker/Dockerfile` (`NMOS_CPP_REF`; that tree contains the MXL
+transport, the older Conan Center package does not). Dependencies are Boost,
+the C++ REST SDK, OpenSSL, and Avahi's `libdns_sd` compatibility library.
+Pass the `Development` directory:
 
 ```bash
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
@@ -114,7 +116,10 @@ CI publishes the container to GitHub Container Registry
 | `nightly-dev` | latest build from `main` |
 | `git-<sha>` | every published build, for pinning |
 
-Or build the container image (multi-stage, builds MXL internally):
+The image includes the BCP-007-03 node. Set `NMOS_ENABLE=true` to serve it
+(Node API on `NMOS_PORT`, default 3212; WebSocket on the next port).
+
+Or build the container image (multi-stage, builds MXL and nmos-cpp internally):
 
 ```bash
 docker build -f docker/Dockerfile .
@@ -235,6 +240,8 @@ identical channel/MXL code paths as real hardware.
 LD_LIBRARY_PATH=/opt/mxl/lib ./build/unit-tests
 # end-to-end smoke test (mock card + real MXL domain in /dev/shm)
 LD_LIBRARY_PATH=/opt/mxl/lib tests/integration/smoke.sh build/mxl-decklink
+# BCP-007-03 node (binary built with -DMXL_DECKLINK_NMOS=ON)
+LD_LIBRARY_PATH=/opt/mxl/lib tests/integration/nmos-smoke.sh build/mxl-decklink
 ```
 
 ## Known deviations from SPECIFICATION.md

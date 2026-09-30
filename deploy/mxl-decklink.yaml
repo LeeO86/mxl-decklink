@@ -100,12 +100,21 @@ spec:
               value: "0,1"
             - name: CH1_LABEL
               value: playout-1
+            # BCP-007-03 node, linked into the image.
+            - name: NMOS_ENABLE
+              value: "true"
+            - name: NMOS_PORT
+              value: "3212"
           ports:
             # Consolidated HTTP port (§7.1): web UI + REST API + health + metrics.
             # Unauthenticated — expose only via an authenticating ingress, or
             # set WEB_ENABLE=false for fixed installations (health/metrics stay).
             - name: http
               containerPort: 8080
+            - name: nmos
+              containerPort: 3212
+            - name: nmos-ws
+              containerPort: 3213
           # §7.1 recommended probes.
           livenessProbe:
             httpGet:
@@ -154,3 +163,9 @@ spec:
     - name: http
       port: 8080
       targetPort: http
+    - name: nmos
+      port: 3212
+      targetPort: nmos
+    - name: nmos-ws
+      port: 3213
+      targetPort: nmos-ws

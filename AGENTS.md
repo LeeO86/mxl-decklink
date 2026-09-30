@@ -34,6 +34,8 @@ default toolchain works and no `CC`/`CXX` override is needed (CMake picks up
 ```bash
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DMXL_DECKLINK_BUILD_TESTS=ON \
+  -DMXL_DECKLINK_NMOS=ON \
+  -DNMOS_CPP_DIR=/tmp/nmos-cpp/Development \
   "-DCMAKE_PREFIX_PATH=/opt/mxl;$HOME/mxl/build/vcpkg_installed/x64-linux"
 cmake --build build -j"$(nproc)"
 
@@ -41,7 +43,14 @@ cmake --build build -j"$(nproc)"
 LD_LIBRARY_PATH=/opt/mxl/lib ./build/unit-tests
 # end-to-end smoke test (mock card + real MXL domain in /dev/shm)
 LD_LIBRARY_PATH=/opt/mxl/lib tests/integration/smoke.sh build/mxl-decklink
+# BCP-007-03 node (only when the binary was built with MXL_DECKLINK_NMOS)
+LD_LIBRARY_PATH=/opt/mxl/lib tests/integration/nmos-smoke.sh build/mxl-decklink
 ```
+
+CI and `docker/Dockerfile` always link nmos-cpp (`NMOS_CPP_REF` in those files).
+Build dependencies for that option are Boost, `libcpprest-dev`,
+`nlohmann-json3-dev`, OpenSSL, and `libavahi-compat-libdnssd-dev`. A checkout
+of that commit is expected at `/tmp/nmos-cpp` (the `Development/` directory).
 
 Run the service directly with the mock backend by setting `MXL_DECKLINK_BACKEND=mock`
 plus the `CHx_*` variables from `README.md` §Running (always with
