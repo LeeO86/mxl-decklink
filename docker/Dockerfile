@@ -3,6 +3,8 @@
 #
 # Build args:
 #   MXL_REF               dmf-mxl/mxl git ref to build against (default v1.1.0)
+#   NMOS_CPP_REF          sony/nmos-cpp commit with the MXL transport (BCP-007-03).
+#                         Keep in sync with .github/workflows/ci.yaml.
 #   DESKTOPVIDEO_DEB_URL  optional URL of the Blackmagic Desktop Video
 #                         user-space .deb (bundled mode). When empty, the image
 #                         expects libDeckLinkAPI.so bind-mounted from the host
@@ -23,10 +25,15 @@ RUN npm run build
 FROM ubuntu:24.04 AS build
 
 ARG MXL_REF=v1.1.0
+ARG NMOS_CPP_REF=fe303849527394b03bdedc8f161f377fe458bb62
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         build-essential cmake ninja-build git pkg-config curl zip unzip tar \
         ca-certificates bison flex autoconf automake libtool \
+        libboost-system-dev libboost-thread-dev libboost-chrono-dev \
+        libboost-date-time-dev libboost-regex-dev libboost-random-dev \
+        libboost-filesystem-dev libcpprest-dev nlohmann-json3-dev \
+        libssl-dev libavahi-compat-libdnssd-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # vcpkg for the MXL dependency manifest (spdlog, fmt, stduuid, picojson, ada-url).
@@ -45,6 +52,12 @@ RUN git clone --branch "${MXL_REF}" https://github.com/dmf-mxl/mxl /tmp/mxl \
     && cmake --build /tmp/mxl/build -j"$(nproc)" \
     && cmake --install /tmp/mxl/build
 
+# Sony nmos-cpp (the MXL transport lives on this commit, not in the Conan package).
+RUN git -c init.defaultBranch=main init /opt/nmos-cpp \
+    && git -C /opt/nmos-cpp remote add origin https://github.com/sony/nmos-cpp.git \
+    && git -C /opt/nmos-cpp fetch --depth 1 origin "${NMOS_CPP_REF}" \
+    && git -C /opt/nmos-cpp -c advice.detachedHead=false checkout FETCH_HEAD
+
 # The application. The DeckLink interface headers are vendored in-tree;
 # libDeckLinkAPI.so is dlopen'ed at runtime, never linked (§5.1).
 COPY . /src
@@ -53,6 +66,8 @@ RUN cmake -S /src -B /src/build -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         "-DCMAKE_PREFIX_PATH=/opt/mxl;/tmp/mxl/build/vcpkg_installed/x64-linux" \
         -DMXL_DECKLINK_BUILD_TESTS=ON \
+        -DMXL_DECKLINK_NMOS=ON \
+        -DNMOS_CPP_DIR=/opt/nmos-cpp/Development \
         -DMXL_DECKLINK_USE_PREBUILT_WEBUI=ON \
     && cmake --build /src/build -j"$(nproc)" \
     && LD_LIBRARY_PATH=/opt/mxl/lib /src/build/unit-tests
@@ -64,6 +79,8 @@ ARG DESKTOPVIDEO_DEB_URL=""
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ca-certificates curl \
+        libcpprest2.10 libboost-chrono1.83.0t64 libboost-thread1.83.0 \
+        libssl3t64 libavahi-compat-libdnssd1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Optional bundled Desktop Video user-space package (§5.1 stage 2). The DKMS
@@ -88,5 +105,5 @@ RUN useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin mxl \
     && usermod -aG video mxl
 USER 10001:10001
 
-EXPOSE 8080
+EXPOSE 8080 3212 3213
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

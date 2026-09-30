@@ -10,6 +10,9 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       MXL_REF: v1.1.0
+      # sony/nmos-cpp commit that includes the MXL transport (BCP-007-03).
+      # Keep in sync with docker/Dockerfile ARG NMOS_CPP_REF.
+      NMOS_CPP_REF: fe303849527394b03bdedc8f161f377fe458bb62
     steps:
       - uses: actions/checkout@v4
 
@@ -18,7 +21,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build pkg-config curl zip unzip tar \
-            bison flex autoconf automake libtool
+            bison flex autoconf automake libtool \
+            libboost-system-dev libboost-thread-dev libboost-chrono-dev \
+            libboost-date-time-dev libboost-regex-dev libboost-random-dev \
+            libboost-filesystem-dev libcpprest-dev nlohmann-json3-dev \
+            libssl-dev libavahi-compat-libdnssd-dev
 
       - name: Set up Node.js (Vue web UI)
         uses: actions/setup-node@v4
@@ -52,9 +59,18 @@ jobs:
           sudo cmake --install /tmp/mxl/build
           cp -r /tmp/mxl/build/vcpkg_installed/x64-linux mxl-vcpkg-installed
 
+      - name: Fetch nmos-cpp
+        run: |
+          git -c init.defaultBranch=main init /tmp/nmos-cpp
+          git -C /tmp/nmos-cpp remote add origin https://github.com/sony/nmos-cpp.git
+          git -C /tmp/nmos-cpp fetch --depth 1 origin "$NMOS_CPP_REF"
+          git -C /tmp/nmos-cpp -c advice.detachedHead=false checkout FETCH_HEAD
+
       - name: Configure and build
         run: |
           cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DMXL_DECKLINK_NMOS=ON \
+            -DNMOS_CPP_DIR=/tmp/nmos-cpp/Development \
             "-DCMAKE_PREFIX_PATH=/opt/mxl;$PWD/mxl-vcpkg-installed"
           cmake --build build -j"$(nproc)"
 
@@ -63,3 +79,6 @@ jobs:
 
       - name: Integration smoke test (mock DeckLink backend)
         run: LD_LIBRARY_PATH=/opt/mxl/lib tests/integration/smoke.sh build/mxl-decklink
+
+      - name: NMOS node smoke test (BCP-007-03)
+        run: LD_LIBRARY_PATH=/opt/mxl/lib tests/integration/nmos-smoke.sh build/mxl-decklink

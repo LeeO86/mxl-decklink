@@ -149,9 +149,9 @@ target_link_libraries(mxl-decklink-core
 add_executable(mxl-decklink src/main.cpp)
 target_link_libraries(mxl-decklink PRIVATE mxl-decklink-core)
 
-# Optional AMWA IS-04/IS-05 node (BCP-007-03). Off by default so CI does not
-# need the nmos-cpp dependency tree. Point NMOS_CPP_DIR at a checkout of
-# sony/nmos-cpp master (the tree that contains the MXL transport):
+# AMWA IS-04/IS-05 node (BCP-007-03). The container image and CI always pass
+# ON. A local build can omit it. Point NMOS_CPP_DIR at sony/nmos-cpp
+# Development/ (the commit in docker/Dockerfile, which has the MXL transport):
 #   cmake -DMXL_DECKLINK_NMOS=ON -DNMOS_CPP_DIR=/path/to/nmos-cpp/Development ...
 option(MXL_DECKLINK_NMOS "Link Sony nmos-cpp and serve a BCP-007-03 node" OFF)
 set(NMOS_CPP_DIR "" CACHE PATH "Path to sony/nmos-cpp Development/ (used when MXL_DECKLINK_NMOS=ON)")

@@ -148,10 +148,12 @@ The abstraction is intentionally thin (value types + 3 interfaces) so the hot pa
 ## 5. Containers and deployment
 
 - **Dockerfile** (multi-stage, `ubuntu:24.04`): stage 1 builds MXL v1.1.0 (vcpkg
-  manifest, `Linux-GCC-Release` preset) then this application; stage 2 is the slim
-  runtime with a non-root user (uid 10001, group `video`), the entrypoint validating
-  `/dev/blackmagic` + `${MXL_DOMAIN_PATH}`, and optional Desktop Video installation via
-  build-arg (`DECKLINK_LIB_MODE=bundled`) or host bind-mount (`hostmount`).
+  manifest, `Linux-GCC-Release` preset) and Sony nmos-cpp, then this application
+  with `MXL_DECKLINK_NMOS=ON`; stage 2 is the slim runtime (including the
+  nmos-cpp shared libraries) with a non-root user (uid 10001, group `video`),
+  the entrypoint validating `/dev/blackmagic` + `${MXL_DOMAIN_PATH}`, and optional
+  Desktop Video installation via build-arg (`DECKLINK_LIB_MODE=bundled`) or host
+  bind-mount (`hostmount`).
 - **docker-compose.yaml** — single-card example with device mapping, `/dev/shm/mxl`
   bind, health/metrics ports.
 - **deploy/** — Deployment with Guaranteed QoS, `generic-device-plugin` ConfigMap
