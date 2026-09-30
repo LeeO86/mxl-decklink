@@ -124,11 +124,15 @@ namespace mxldl::nmosnode
             return out;
         }
 
-        web::json::value capsWith(web::json::value set)
+        web::json::value capsWith(web::json::value set, utility::string_t const& mediaType)
         {
             web::json::value sets = web::json::value::array();
             web::json::push_back(sets, std::move(set));
+            web::json::value types = web::json::value::array();
+            web::json::push_back(types, web::json::value::string(mediaType));
             web::json::value caps = web::json::value::object();
+            // IS-04 caps.media_types is what BCP-007-03 checks; the constraint set repeats it.
+            caps[U("media_types")] = std::move(types);
             caps[U("constraint_sets")] = std::move(sets);
             caps[U("version")] = web::json::value::string(nmos::make_version());
             return caps;
@@ -245,10 +249,6 @@ namespace mxldl::nmosnode
 
         std::string resolveReceiverDomain(std::string const& flowId)
         {
-            if (domains.size() == 1)
-            {
-                return domains.front().id;
-            }
             if (!flowId.empty())
             {
                 for (auto const& domain : domains)
@@ -262,7 +262,9 @@ namespace mxldl::nmosnode
                     }
                 }
             }
-            return {};
+            // Current operating context: the domain this process writes. Auto must
+            // resolve to a concrete id; an unresolved auto is an activation error.
+            return primaryDomainId;
         }
 
         void insert(nmos::node_model& model, nmos::resources& resources, nmos::resource&& resource)
@@ -393,7 +395,7 @@ namespace mxldl::nmosnode
                         set[U("urn:x-nmos:cap:format:interlace_mode")] = nmos::make_caps_string_constraint({interlaceOf(mode).name});
                         set[U("urn:x-nmos:cap:format:color_sampling")] = nmos::make_caps_string_constraint({sdp::samplings::YCbCr_4_2_2.name});
                         set[U("urn:x-nmos:cap:format:component_depth")] = nmos::make_caps_integer_constraint({int64_t{10}});
-                        receiver.data[U("caps")] = capsWith(std::move(set));
+                        receiver.data[U("caps")] = capsWith(std::move(set), media.name);
                     }
                     else if (leg.kind == nmosroute::LegKind::Audio)
                     {
@@ -412,7 +414,7 @@ namespace mxldl::nmosnode
                         set[U("urn:x-nmos:cap:format:channel_count")] = nmos::make_caps_integer_constraint({static_cast<int64_t>(count)});
                         set[U("urn:x-nmos:cap:format:sample_rate")] = nmos::make_caps_rational_constraint({nmos::rational{48000, 1}});
                         set[U("urn:x-nmos:cap:format:sample_depth")] = nmos::make_caps_integer_constraint({int64_t{32}});
-                        receiver.data[U("caps")] = capsWith(std::move(set));
+                        receiver.data[U("caps")] = capsWith(std::move(set), nmos::media_types::audio_float32.name);
                     }
                     else
                     {
@@ -420,7 +422,7 @@ namespace mxldl::nmosnode
                         web::json::value set = web::json::value::object();
                         set[U("urn:x-nmos:cap:format:media_type")] = nmos::make_caps_string_constraint({nmos::media_types::video_smpte291.name});
                         set[U("urn:x-nmos:cap:format:grain_rate")] = nmos::make_caps_rational_constraint({rateOf(mode)});
-                        receiver.data[U("caps")] = capsWith(std::move(set));
+                        receiver.data[U("caps")] = capsWith(std::move(set), nmos::media_types::video_smpte291.name);
                     }
                     auto const role = leg.kind == nmosroute::LegKind::Video ? "Video" : leg.kind == nmosroute::LegKind::Audio ? "Audio" : "Data";
                     setLabel(receiver, ch->label + " " + role, "MXL receiver");
