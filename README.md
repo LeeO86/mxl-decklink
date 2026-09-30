@@ -117,10 +117,11 @@ volumes:
 ```
 
 `ports:` is ignored with host networking; the process binds 8080, 3212, and
-3213 on the host. The same two sockets are what a Kubernetes pod needs, plus
+3213 on the host. A Kubernetes pod needs those same two mounts, plus
 `hostNetwork: true` and `dnsPolicy: ClusterFirstWithHostNet`, because the
 pod otherwise has no multicast path to the LAN. `deploy/mxl-decklink.yaml`
-is the unicast layout and does not set `hostNetwork`.
+does not set `hostNetwork`; add `NMOS_REGISTRY_ADDRESS` there for unicast
+registration.
 
 Senders write the domain in `MXL_DOMAIN_PATH` (its `domain_def.json` `id` is
 `mxl_domain_id`). Receivers may read any domain discovered under
