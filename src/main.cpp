@@ -20,6 +20,9 @@
 #include "ops/webapi.hpp"
 #include "util/logging.hpp"
 #include "version.hpp"
+#ifdef MXL_DECKLINK_NMOS
+#include "nmos/node.hpp"
+#endif
 
 namespace
 {
@@ -90,6 +93,15 @@ int main()
     }
 
     mxldl::log::configure(mxldl::log::parseLevel(cfg.logLevel), mxldl::log::parseFormat(cfg.logFormat));
+
+#ifndef MXL_DECKLINK_NMOS
+    if (cfg.nmosEnable)
+    {
+        mxldl::log::error("nmos_not_built",
+            {{"details", "NMOS_ENABLE=true but this binary was built without -DMXL_DECKLINK_NMOS=ON (Sony nmos-cpp)"}});
+        return kExitConfig;
+    }
+#endif
 
     mxlVersionType mxlVersion{};
     ::mxlGetVersion(&mxlVersion);
@@ -185,6 +197,23 @@ int main()
 
         mxldl::ops::Housekeeping housekeeping(cfg, channels, *domain, health, metrics);
         housekeeping.start();
+
+#ifdef MXL_DECKLINK_NMOS
+        std::unique_ptr<mxldl::nmosnode::Node> nmosNode;
+        if (cfg.nmosEnable)
+        {
+            try
+            {
+                nmosNode = std::make_unique<mxldl::nmosnode::Node>(cfg, channels, card->persistentId(), card->displayName());
+                nmosNode->start();
+            }
+            catch (std::exception const& e)
+            {
+                mxldl::log::error("nmos_node_failed", {{"details", e.what()}});
+                return kExitTempFail;
+            }
+        }
+#endif
         channels.startAll();
 
         // §7.1/§7.5: the consolidated HTTP server (health + metrics always;
@@ -239,6 +268,13 @@ int main()
             }
         });
 
+#ifdef MXL_DECKLINK_NMOS
+        if (nmosNode)
+        {
+            nmosNode->stop();
+            nmosNode.reset();
+        }
+#endif
         channels.stopAll(); // steps 1–4: stop streams, flush, disable, release writers/readers
         mxldl::log::debug("shutdown_stage", {{"stage", "channels_stopped"}});
         web.stop();

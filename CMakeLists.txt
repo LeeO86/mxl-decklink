@@ -120,6 +120,7 @@ add_library(mxl-decklink-core STATIC
     src/mxlbridge/domainscan.cpp
     src/mxlbridge/flowdef.cpp
     src/mxlbridge/flowsync.cpp
+    src/nmos/routing.cpp
     src/mxlbridge/videowriter.cpp
     src/mxlbridge/videoreader.cpp
     src/mxlbridge/audiowriter.cpp
@@ -148,6 +149,35 @@ target_link_libraries(mxl-decklink-core
 add_executable(mxl-decklink src/main.cpp)
 target_link_libraries(mxl-decklink PRIVATE mxl-decklink-core)
 
+# Optional AMWA IS-04/IS-05 node (BCP-007-03). Off by default so CI does not
+# need the nmos-cpp dependency tree. Point NMOS_CPP_DIR at a checkout of
+# sony/nmos-cpp master (the tree that contains the MXL transport):
+#   cmake -DMXL_DECKLINK_NMOS=ON -DNMOS_CPP_DIR=/path/to/nmos-cpp/Development ...
+option(MXL_DECKLINK_NMOS "Link Sony nmos-cpp and serve a BCP-007-03 node" OFF)
+set(NMOS_CPP_DIR "" CACHE PATH "Path to sony/nmos-cpp Development/ (used when MXL_DECKLINK_NMOS=ON)")
+if(MXL_DECKLINK_NMOS)
+    if(NOT NMOS_CPP_DIR)
+        message(FATAL_ERROR "MXL_DECKLINK_NMOS=ON requires -DNMOS_CPP_DIR=<sony/nmos-cpp>/Development")
+    endif()
+    set(NMOS_CPP_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(NMOS_CPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(NMOS_CPP_USE_SUPPLIED_JSON_SCHEMA_VALIDATOR ON CACHE BOOL "" FORCE)
+    set(NMOS_CPP_USE_SUPPLIED_JWT_CPP ON CACHE BOOL "" FORCE)
+    # websocketpp (pulled in by nmos-cpp) does not parse as C++20.
+    set(CMAKE_CXX_STANDARD 17)
+    add_subdirectory(${NMOS_CPP_DIR} ${CMAKE_BINARY_DIR}/nmos-cpp EXCLUDE_FROM_ALL)
+    set(CMAKE_CXX_STANDARD 20)
+    if(TARGET nmos-cpp)
+        set_target_properties(nmos-cpp PROPERTIES CXX_STANDARD 17)
+    endif()
+    target_sources(mxl-decklink PRIVATE src/nmos/node.cpp)
+    target_compile_definitions(mxl-decklink PRIVATE MXL_DECKLINK_NMOS=1)
+    target_link_libraries(mxl-decklink PRIVATE nmos-cpp::nmos-cpp)
+    set_source_files_properties(src/nmos/node.cpp PROPERTIES
+        CXX_STANDARD 17
+        COMPILE_OPTIONS "-w")
+endif()
+
 install(TARGETS mxl-decklink RUNTIME DESTINATION bin)
 
 # ------------------------------------------------------------------
@@ -169,6 +199,7 @@ if(MXL_DECKLINK_BUILD_TESTS)
         tests/unit/test_store.cpp
         tests/unit/test_domainscan.cpp
         tests/unit/test_schema.cpp
+        tests/unit/test_nmos_routing.cpp
     )
     target_link_libraries(unit-tests PRIVATE mxl-decklink-core)
     add_test(NAME unit-tests COMMAND unit-tests)

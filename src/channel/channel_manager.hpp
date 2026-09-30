@@ -3,6 +3,7 @@
 // §3.7, §7.2) and applies runtime per-channel reconfiguration (§7.5.3).
 #pragma once
 
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -47,6 +48,15 @@ namespace mxldl::channel
         /// Housekeeping tick for all channels (§2.5).
         void housekeeping();
 
+        /// Snapshot of the running channel configuration (for NMOS activation).
+        [[nodiscard]] std::vector<config::ChannelConfig> channelConfigs() const;
+
+        /// Installed on each input channel before it starts. See InputChannel::setRuntimeFlowsHandler.
+        void setRuntimeFlowsHandler(std::function<void(int channelIndex, InputChannel::RuntimeFlows const&)> handler);
+
+        /// Called after a successful applyChannels, without the manager lock held.
+        void setChannelsChangedHandler(std::function<void(std::vector<config::ChannelConfig> const&)> handler);
+
         struct ChannelView
         {
             config::ChannelConfig cfg;
@@ -87,5 +97,7 @@ namespace mxldl::channel
         mutable std::mutex _mutex;
         std::map<int, Entry> _entries;
         bool _started = false;
+        std::function<void(int, InputChannel::RuntimeFlows const&)> _runtimeFlows;
+        std::function<void(std::vector<config::ChannelConfig> const&)> _channelsChanged;
     };
 }

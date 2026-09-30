@@ -4,10 +4,12 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "channel/state.hpp"
@@ -48,6 +50,18 @@ namespace mxldl::channel
         /// Housekeeping poll (§2.5): updates signal-lock gauge and performs
         /// the hardware-clock rolling recalibration (§3.5).
         void housekeeping();
+
+        /// Fired after an auto-format change mints replacement MXL flow ids
+        /// (§3.8) so an NMOS node can update IS-04/IS-05. Called on the
+        /// channel supervisor thread.
+        struct RuntimeFlows
+        {
+            std::string videoId;
+            std::vector<std::pair<int, std::string>> audioIds;
+            std::optional<std::string> ancId;
+            config::VideoMode mode{};
+        };
+        void setRuntimeFlowsHandler(std::function<void(int channelIndex, RuntimeFlows const&)> handler);
 
     private:
         struct AudioFlowWriter
@@ -104,6 +118,7 @@ namespace mxldl::channel
         std::optional<dl::FormatChange> _pendingFormatChange;
         int _formatChangeCounter = 0;
 
+        std::function<void(int, RuntimeFlows const&)> _runtimeFlows;
         std::thread _supervisor;
         std::atomic<bool> _running{false};
         std::atomic<bool> _streamingUp{false};

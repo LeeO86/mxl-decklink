@@ -34,7 +34,7 @@ The degenerate single-channel configuration (one card, one channel, one directio
 **Non-goals.**
 
 - The container implements **no ST 2110 stack of its own**: 2110-20/-30/-40 termination is done by the DeckLink IP 100G in firmware, or by an external gateway.
-- It implements **no NMOS IS-04/IS-05**: registration and connection management are the responsibility of the card (IP models) or external controllers (VideoIPath, Sony NMOS controller, EBU node controller). The container merely publishes the flow identifiers that a controller binds.
+- **NMOS IS-04/IS-05 is optional.** When the binary is built with `MXL_DECKLINK_NMOS` and `NMOS_ENABLE=true`, the process is a BCP-007-03 node (Sony nmos-cpp): each MXL writer is an IS-04 Source/Flow/Sender and each MXL reader is an IS-04 Receiver, both with transport `urn:x-nmos:transport:mxl`. IS-05 `master_enable` starts and stops the MXL read or write; `mxl_domain_id` and `mxl_flow_id` select the domain and flow. The DeckLink IP card's own ST 2110 NMOS node, when present, stays a separate node. Without this build flag the container only publishes flow identifiers for an external controller to bind.
 - The container performs **no video format conversion** beyond the minimum required for MXL v1.0 compatibility (see §3.3).
 - It is **not** a GPU compositing or codec container.
 - It does **not** replace the Blackmagic Desktop Video driver, which must be installed on the host.
@@ -110,7 +110,7 @@ Selection by display name (`GetDisplayName()`) and by raw iterator index are sup
 
 **Multi-process behavior (informative).** The Blackmagic SDK permits different processes to own different sub-devices of the same card simultaneously; a single sub-device is exclusive to one process. Global configuration objects (`IDeckLinkConfiguration`) are shared across processes via the host-side `DesktopVideoHelper.service`. This specification nevertheless mandates single-process-per-card ownership because of the profile semantics described in §3.9.
 
-**IP-card detection.** The container probes `QueryInterface(IID_IDeckLinkIPExtensions)`; on success it reads the active `IDeckLinkIPFlow` SDP descriptions for logging and health metrics only — the actual 2110 configuration remains with the card (Blackmagic configuration tools / NMOS, outside the container).
+**IP-card detection.** The container probes `QueryInterface(IID_IDeckLinkIPExtensions)`; on success it reads the active `IDeckLinkIPFlow` SDP descriptions for logging and health metrics only — the actual 2110 configuration remains with the card (Blackmagic configuration tools / the card's own NMOS node, outside the container). The optional BCP-007-03 node described above controls MXL flows, not the card's RTP senders.
 
 ### 3.2 Video Mode Detection and Selection
 
