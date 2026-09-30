@@ -52,6 +52,11 @@ namespace mxldl::mxlbridge
             return _flowId;
         }
 
+        [[nodiscard]] mxlFlowReader handle() const
+        {
+            return _reader;
+        }
+
     private:
         Domain& _domain;
         std::string _flowId;

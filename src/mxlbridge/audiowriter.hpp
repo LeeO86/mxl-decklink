@@ -46,6 +46,12 @@ namespace mxldl::mxlbridge
             return _configInfo.continuous.bufferLength;
         }
 
+        /// Largest sample count one OpenSamples call may write (MXL 1.1).
+        [[nodiscard]] std::size_t maxWriteLength() const
+        {
+            return _maxWriteLength;
+        }
+
         [[nodiscard]] std::string const& flowId() const
         {
             return _flowIdString;
@@ -55,6 +61,7 @@ namespace mxldl::mxlbridge
         Domain& _domain;
         mxlFlowWriter _writer = nullptr;
         mxlFlowConfigInfo _configInfo{};
+        std::size_t _maxWriteLength = 0;
         std::string _flowIdString;
     };
 }

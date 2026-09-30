@@ -2,7 +2,7 @@
 # Multi-stage build per SPECIFICATION.md §5.1.
 #
 # Build args:
-#   MXL_REF               dmf-mxl/mxl git ref to build against (default v1.0.1)
+#   MXL_REF               dmf-mxl/mxl git ref to build against (default v1.1.0)
 #   DESKTOPVIDEO_DEB_URL  optional URL of the Blackmagic Desktop Video
 #                         user-space .deb (bundled mode). When empty, the image
 #                         expects libDeckLinkAPI.so bind-mounted from the host
@@ -22,24 +22,25 @@ RUN npm run build
 # ---------------------------------------------------------------------------
 FROM ubuntu:24.04 AS build
 
-ARG MXL_REF=v1.0.1
+ARG MXL_REF=v1.1.0
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         build-essential cmake ninja-build git pkg-config curl zip unzip tar \
         ca-certificates bison flex autoconf automake libtool \
     && rm -rf /var/lib/apt/lists/*
 
-# vcpkg for the MXL dependency manifest (spdlog, fmt, stduuid, picojson).
+# vcpkg for the MXL dependency manifest (spdlog, fmt, stduuid, picojson, ada-url).
 RUN git clone https://github.com/microsoft/vcpkg /opt/vcpkg \
     && /opt/vcpkg/bootstrap-vcpkg.sh -disableMetrics
 ENV VCPKG_ROOT=/opt/vcpkg
 
-# MXL v1.0.1 (Apache-2.0), installed to /opt/mxl.
+# MXL v1.1.0 (Apache-2.0), installed to /opt/mxl.
 RUN git clone --branch "${MXL_REF}" https://github.com/dmf-mxl/mxl /tmp/mxl \
     && cmake -S /tmp/mxl -B /tmp/mxl/build -G Ninja \
         -DCMAKE_TOOLCHAIN_FILE=/opt/vcpkg/scripts/buildsystems/vcpkg.cmake \
         -DCMAKE_BUILD_TYPE=Release \
         -DBUILD_TESTS=OFF -DBUILD_TOOLS=OFF -DBUILD_UTILS=OFF -DBUILD_DOCS=OFF \
+        -DMXL_ENABLE_FABRICS_OFI=OFF \
         -DCMAKE_INSTALL_PREFIX=/opt/mxl \
     && cmake --build /tmp/mxl/build -j"$(nproc)" \
     && cmake --install /tmp/mxl/build

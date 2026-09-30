@@ -40,6 +40,17 @@ namespace mxldl::mxlbridge
             return _configInfo.continuous.bufferLength;
         }
 
+        /// Largest sample count one GetSamples call may read (MXL 1.1).
+        [[nodiscard]] std::size_t maxReadLength() const
+        {
+            return _maxReadLength;
+        }
+
+        [[nodiscard]] mxlFlowReader handle() const
+        {
+            return _reader;
+        }
+
         [[nodiscard]] std::string const& flowId() const
         {
             return _flowId;
@@ -50,5 +61,6 @@ namespace mxldl::mxlbridge
         std::string _flowId;
         mxlFlowReader _reader = nullptr;
         mxlFlowConfigInfo _configInfo{};
+        std::size_t _maxReadLength = 0;
     };
 }

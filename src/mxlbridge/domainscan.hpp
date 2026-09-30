@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // MXL domain and flow discovery + domain creation (SPECIFICATION.md §7.6).
 //
-// Everything here is deliberately filesystem-based (documented MXL v1.0.1
+// Everything here is deliberately filesystem-based (documented MXL
 // on-disk layout: {domain}/{uuid}.mxl-flow/{flow_def.json,data,...},
 // domain-level options.json, and the mxl-hands-on domain_def.json marker):
 // no mxlInstance is created on foreign domains, so browsing can never disturb

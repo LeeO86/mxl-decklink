@@ -9,7 +9,7 @@ jobs:
   build-and-test:
     runs-on: ubuntu-24.04
     env:
-      MXL_REF: v1.0.1
+      MXL_REF: v1.1.0
     steps:
       - uses: actions/checkout@v4
 
@@ -46,6 +46,7 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE="$HOME/vcpkg/scripts/buildsystems/vcpkg.cmake" \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_TESTS=OFF -DBUILD_TOOLS=OFF -DBUILD_UTILS=OFF -DBUILD_DOCS=OFF \
+            -DMXL_ENABLE_FABRICS_OFI=OFF \
             -DCMAKE_INSTALL_PREFIX=/opt/mxl
           cmake --build /tmp/mxl/build -j"$(nproc)"
           sudo cmake --install /tmp/mxl/build

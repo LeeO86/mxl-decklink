@@ -334,7 +334,7 @@ namespace mxldl::channel
         _videoWriter = std::make_unique<mxlbridge::VideoWriter>(_domain, vp, _cfg.commitBatchHintVideo);
 
         // §4.2 deviation note (IMPLEMENTATION_PLAN.md §3): the actual ring
-        // depth is governed by the domain history duration in MXL v1.0.1.
+        // depth is governed by the domain history duration.
         if (static_cast<int>(_videoWriter->actualGrainCount()) != _cfg.effectiveGrainCount())
         {
             log::warn("grain_count_differs",
@@ -342,7 +342,7 @@ namespace mxldl::channel
                     {"channel_index", _cfg.index},
                     {"requested", _cfg.effectiveGrainCount()},
                     {"actual", _videoWriter->actualGrainCount()},
-                    {"details", "ring depth is set by the domain history duration (options.json) in MXL v1.0.1"},
+                    {"details", "ring depth is set by the domain history duration (options.json)"},
                 });
         }
 

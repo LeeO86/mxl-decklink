@@ -119,6 +119,7 @@ add_library(mxl-decklink-core STATIC
     src/mxlbridge/domain.cpp
     src/mxlbridge/domainscan.cpp
     src/mxlbridge/flowdef.cpp
+    src/mxlbridge/flowsync.cpp
     src/mxlbridge/videowriter.cpp
     src/mxlbridge/videoreader.cpp
     src/mxlbridge/audiowriter.cpp

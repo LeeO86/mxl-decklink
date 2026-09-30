@@ -17,9 +17,9 @@ with no hardware. Canonical build/run/test commands live in `README.md`
 The external MXL dependency is expensive to build and is prebuilt into the image,
 so the startup update script does not rebuild it:
 
-- `/opt/mxl` — MXL v1.0.1 installed (`libmxl.so`, headers, CMake config).
+- `/opt/mxl` — MXL v1.1.0 installed (`libmxl.so`, headers, CMake config).
 - `~/mxl/build/vcpkg_installed/x64-linux` — MXL's vcpkg dependencies (`fmt`,
-  `spdlog`, `stduuid`, `picojson`); put this on `CMAKE_PREFIX_PATH` when building
+  `spdlog`, `stduuid`, `picojson`, `ada-url`); put this on `CMAKE_PREFIX_PATH` when building
   this app.
 - `~/vcpkg` — bootstrapped vcpkg (only needed to rebuild MXL).
 
@@ -60,6 +60,6 @@ smaller mode/history or a larger tmpfs.
 ### If `/opt/mxl` is ever missing
 
 Rebuild it (only needed if the snapshot lost it) following `.github/workflows/ci.yaml`
-"Build MXL": clone `dmf-mxl/mxl` at `v1.0.1`, configure with the `~/vcpkg` toolchain,
+"Build MXL": clone `dmf-mxl/mxl` at `v1.1.0`, configure with the `~/vcpkg` toolchain,
 install to `/opt/mxl`, and keep `build/vcpkg_installed/x64-linux` for
 `CMAKE_PREFIX_PATH`.

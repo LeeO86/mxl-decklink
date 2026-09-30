@@ -14,6 +14,7 @@
 #include "decklink/device.hpp"
 #include "mxlbridge/audioreader.hpp"
 #include "mxlbridge/domain.hpp"
+#include "mxlbridge/flowsync.hpp"
 #include "mxlbridge/videoreader.hpp"
 #include "ops/metrics.hpp"
 
@@ -69,6 +70,8 @@ namespace mxldl::channel
         std::unique_ptr<dl::IPlaybackSession> _playback;
         std::unique_ptr<mxlbridge::VideoReader> _videoReader;
         std::vector<AudioFlowReader> _audioFlows;
+        /// Released before the readers: the group holds raw reader handles.
+        std::unique_ptr<mxlbridge::FlowSyncGroup> _sync;
 
         config::VideoMode _mode{};
         std::atomic<bool> _playing{false};

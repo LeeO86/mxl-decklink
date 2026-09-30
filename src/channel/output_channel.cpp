@@ -5,6 +5,8 @@
 
 #include <mxl/time.h>
 
+#include <limits>
+
 #include "util/logging.hpp"
 #include "util/taiclock.hpp"
 #include "util/threading.hpp"
@@ -197,6 +199,16 @@ namespace mxldl::channel
                 }
             }
 
+            _sync = std::make_unique<mxlbridge::FlowSyncGroup>(_domain);
+            _sync->addReader(_videoReader->handle());
+            for (auto const& af : _audioFlows)
+            {
+                if (af.reader)
+                {
+                    _sync->addReader(af.reader->handle());
+                }
+            }
+
             _playback = _subDevice.openPlayback();
             if (!_playback)
             {
@@ -298,6 +310,7 @@ namespace mxldl::channel
                     {"video_mode", _mode.name},
                     {"flow_id", _cfg.videoFlowId.toString()},
                     {"preroll_grains", _cfg.outputPrerollGrains},
+                    {"sync_group", true},
                 });
             return true;
         }
@@ -313,6 +326,7 @@ namespace mxldl::channel
     {
         _streamingUp.store(false);
         _playing.store(false);
+        _sync.reset();
         if (_playback)
         {
             _playback->stopPlayback();
@@ -327,7 +341,23 @@ namespace mxldl::channel
     {
         mxlbridge::VideoReader::Grain grain;
         auto const timeoutNs = static_cast<std::uint64_t>(_cfg.readerTimeoutMs) * 1'000'000ULL;
-        auto const status = _videoReader->getGrain(grainIndex, timeoutNs, grain);
+        auto grainTimeoutNs = timeoutNs;
+        if (_sync)
+        {
+            auto const rate = _videoReader->grainRate();
+            auto const timestamp = ::mxlIndexToTimestamp(&rate, grainIndex);
+            if (timestamp != std::numeric_limits<std::uint64_t>::max())
+            {
+                // One wait covers the video grain and the audio sample at the
+                // same TAI time. A successful wait means the grain fetch below
+                // should not block.
+                if (_sync->waitFor(timestamp, timeoutNs) == MXL_STATUS_OK)
+                {
+                    grainTimeoutNs = 0;
+                }
+            }
+        }
+        auto const status = _videoReader->getGrain(grainIndex, grainTimeoutNs, grain);
 
         std::uint8_t const* bytes = nullptr;
         std::size_t size = 0;

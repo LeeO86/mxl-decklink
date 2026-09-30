@@ -11,7 +11,7 @@ and output channels (`MXL → DeckLink`) in any combination. See
 [`SPECIFICATION.md`](SPECIFICATION.md) for the normative specification and
 [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) for how this codebase maps
 onto it (including the few places where the implementation follows the actual
-MXL v1.0.1 API rather than the spec's paraphrase of it).
+MXL v1.1 API rather than the spec's paraphrase of it).
 
 ## Feature summary
 
@@ -47,15 +47,16 @@ MXL v1.0.1 API rather than the spec's paraphrase of it).
 
 Requirements: Linux, CMake ≥ 3.24, GCC ≥ 12 or Clang ≥ 16, Node.js ≥ 20
 (for the Vue web UI build), and an installed
-[MXL](https://github.com/dmf-mxl/mxl) v1.0.1 (`find_package(mxl)`).
+[MXL](https://github.com/dmf-mxl/mxl) v1.1.0 (`find_package(mxl)`).
 
 ```bash
-# Build and install MXL v1.0.1 first (uses vcpkg for its dependencies):
-git clone --branch v1.0.1 https://github.com/dmf-mxl/mxl
+# Build and install MXL v1.1.0 first (uses vcpkg for its dependencies):
+git clone --branch v1.1.0 https://github.com/dmf-mxl/mxl
 cmake -S mxl -B mxl/build -G Ninja \
   -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake \
   -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF -DBUILD_TOOLS=OFF \
-  -DBUILD_UTILS=OFF -DBUILD_DOCS=OFF -DCMAKE_INSTALL_PREFIX=/opt/mxl
+  -DBUILD_UTILS=OFF -DBUILD_DOCS=OFF -DMXL_ENABLE_FABRICS_OFI=OFF \
+  -DCMAKE_INSTALL_PREFIX=/opt/mxl
 cmake --build mxl/build -j && sudo cmake --install mxl/build
 
 # Then this project:
@@ -207,14 +208,17 @@ LD_LIBRARY_PATH=/opt/mxl/lib tests/integration/smoke.sh build/mxl-decklink
 
 Documented in detail in IMPLEMENTATION_PLAN.md §3:
 
-- **Ring depth** (`CHx_GRAIN_COUNT`, `CHx_AUDIO_BUFFER_MS`): MXL v1.0.1 sizes
-  ring buffers domain-globally from the `history_duration` option in
+- **Ring depth** (`CHx_GRAIN_COUNT`, `CHx_AUDIO_BUFFER_MS`): MXL sizes ring
+  buffers domain-globally from the `history_duration` option in
   `{domain}/options.json`, not per flow. The container logs a warning when
   the actual depth differs from the requested one and exposes the actual
   value via `/statusz` and logs. It never rewrites a mounted domain's
   `options.json`.
-- **`mxlFlowSynchronizationGroup`** does not exist in MXL v1.0.1; output
-  alignment uses per-flow readers with TAI pacing instead.
+- **Audio batch size** is capped by `mxlFlowWriterGetMaxWriteLengthSamples` /
+  `mxlFlowReaderGetMaxReadLengthSamples`. Larger DeckLink packets are split.
+- **Output alignment** uses `mxlFlowSynchronizationGroup`: before each video
+  grain is read, the channel waits until that grain and the audio samples at
+  the same TAI time are available.
 - **Grain commit semantics** follow the real API (`validSlices`/`totalSlices`
   and `MXL_GRAIN_FLAG_INVALID`) rather than the spec's `committedSize` field.
 

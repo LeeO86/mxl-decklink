@@ -9,7 +9,7 @@ verification strategy. It was written before the code and kept in sync with it.
 - **Language / toolchain:** C++20, CMake ≥ 3.24, GCC ≥ 12 or Clang ≥ 16. No exceptions
   crossing module boundaries on the hot path; `mxlStatus`/`HRESULT`-style result codes
   internally where it matters.
-- **MXL:** built from `dmf-mxl/mxl` tag `v1.0.1` and consumed via
+- **MXL:** built from `dmf-mxl/mxl` tag `v1.1.0` and consumed via
   `find_package(mxl CONFIG REQUIRED)`. Only the public C API (`mxl/mxl.h`, `mxl/flow.h`,
   `mxl/time.h`) is used.
 - **DeckLink SDK:** the Linux interface headers plus `DeckLinkAPIDispatch.cpp`
@@ -76,17 +76,17 @@ third_party/decklink/      — DeckLink API headers + dispatch (Blackmagic licen
 third_party/doctest/       — vendored test framework header
 ```
 
-## 3. Mapping spec → implementation (and verified MXL v1.0.1 facts)
+## 3. Mapping spec → implementation (and verified MXL v1.1 facts)
 
-The MXL v1.0.1 sources were reviewed before design; the implementation is built on the
+The MXL v1.1 sources were reviewed before design; the implementation is built on the
 **actual** API, not on the spec's paraphrase of it. Differences that matter:
 
-| Spec says | MXL v1.0.1 reality | Implementation |
+| Spec says | MXL v1.1 reality | Implementation |
 |---|---|---|
 | `mxlFlowWriterOpenGrain(inst, writer, index, …)`; `grainInfo.committedSize` | Signature is `mxlFlowWriterOpenGrain(writer, index, &grainInfo, &payload)`; completion is tracked via `grainInfo.validSlices == totalSlices`, not `committedSize` | Writers set `validSlices = totalSlices` (full-frame commit) and use `MXL_GRAIN_FLAG_INVALID` for gaps |
 | `CHx_GRAIN_COUNT` / `CHx_AUDIO_BUFFER_MS` size the rings per flow | Ring depth is **domain-global**: `grainCount = history_duration × rate` from `{domain}/options.json` (`urn:x-mxl:option:history_duration/v1.0`, default 200 ms). The public API cannot set a per-flow depth | The container derives the *requested* history duration from these variables and, when creating a flow yields a different actual depth, logs a structured warning and exports the actual depth via `/statusz` + metrics. It never rewrites a mounted domain's `options.json` (the domain is shared infrastructure per §4.1) |
 | `CHx_COMMIT_BATCH_HINT` → `maxCommitBatchSizeHint` | Passed as writer-options JSON `{"maxCommitBatchSizeHint": N}` to `mxlCreateFlowWriter` | Implemented exactly so |
-| `mxlFlowSynchronizationGroup` for output alignment | **Does not exist in v1.0.1** (it is post-1.0 roadmap) | Output preroll uses `mxlFlowReaderGetGrain` with timeouts + `mxlGetNsUntilIndex` pacing; the sync-group hook is isolated in `output_channel.cpp` for later adoption |
+| `mxlFlowSynchronizationGroup` for output alignment | Present since v1.1. `WaitForDataAt` takes a TAI timestamp (`mxlIndexToTimestamp`), not a grain index. Audio read/write length is capped by `mxlFlowReaderGetMaxReadLengthSamples` / `mxlFlowWriterGetMaxWriteLengthSamples` (half the ring on the POSIX backend) | Each output channel builds a group of its video reader and active audio readers and waits on the grain timestamp before `mxlFlowReaderGetGrain`. Audio batches larger than the max length are split |
 | Audio sample index semantics | `mxlFlowWriterOpenSamples(writer, index, count, …)` addresses the `count` samples **ending at** `index` (same convention as `mxlFlowReaderGetSamples`) | `audiowriter` computes `index = mxlTimestampToIndex(48000/1, tai_first_sample) + count` |
 | ANC flow "per RFC 8331 §2 from the length field onward" | MXL only fixes the container: `format: data`, `media_type: video/smpte291`, 4096-byte grains, 1-byte slices | `anc.cpp` serializes `Length(16) ANC_Count(8) F(2) reserved(22)` followed by 10-bit-packed ANC data packets (C, Line, HO, S, StreamNum, DID, SDID, DC, UDW, CS, word-aligned) — the RFC 8331 payload after the RTP-specific fields |
 | Timestamps via `CLOCK_TAI` | `mxlGetTime()` **is** `CLOCK_TAI`-based; all index math uses 128-bit rounding | The container uses `mxlGetTime`/`mxlTimestampToIndex` for all index math so container and readers can never disagree; hardware calibration (§3.5) is an offset applied before index conversion, recalibrated every 60 s with a 1 ms sanity gate |
@@ -147,7 +147,7 @@ The abstraction is intentionally thin (value types + 3 interfaces) so the hot pa
 
 ## 5. Containers and deployment
 
-- **Dockerfile** (multi-stage, `ubuntu:24.04`): stage 1 builds MXL v1.0.1 (vcpkg
+- **Dockerfile** (multi-stage, `ubuntu:24.04`): stage 1 builds MXL v1.1.0 (vcpkg
   manifest, `Linux-GCC-Release` preset) then this application; stage 2 is the slim
   runtime with a non-root user (uid 10001, group `video`), the entrypoint validating
   `/dev/blackmagic` + `${MXL_DOMAIN_PATH}`, and optional Desktop Video installation via
@@ -213,7 +213,7 @@ This section covers the spec v1.2 additions (§4.5, §7.5, §7.6).
   `mxlIsFlowActive` and reader-based runtime info, and domain creation
   (mkdir + `domain_def.json` + optional `options.json`) with path-containment
   and tmpfs checks. All of this uses public MXL API + documented on-disk
-  layout; creation is container-side because MXL v1.0.1 cannot create domains.
+  layout; creation is container-side because MXL cannot create domains.
 - **Web server (`ops`).** The hand-rolled HTTP server gains request bodies
   (POST/PUT with Content-Length) and serves on a **single** `WEB_PORT`: health
   endpoints, `/metrics`, `/api/…` JSON (§7.5.6), and an embedded Vue 3 SPA

@@ -20,12 +20,22 @@ namespace mxldl::mxlbridge
         {
             throw std::runtime_error("mxlCreateFlowWriter (audio " + _flowIdString + ") failed with status " + std::to_string(status));
         }
+        std::size_t maxWrite = 0;
+        if (::mxlFlowWriterGetMaxWriteLengthSamples(_writer, &maxWrite) == MXL_STATUS_OK && maxWrite > 0)
+        {
+            _maxWriteLength = maxWrite;
+        }
+        else
+        {
+            _maxWriteLength = _configInfo.continuous.bufferLength / 2;
+        }
         log::info("mxl_audio_flow_writer_created",
             {
                 {"flow_id", _flowIdString},
                 {"created", created},
                 {"channel_count", _configInfo.continuous.channelCount},
                 {"buffer_length", _configInfo.continuous.bufferLength},
+                {"max_write_samples", _maxWriteLength},
             });
     }
 
@@ -40,30 +50,43 @@ namespace mxldl::mxlbridge
     mxlStatus AudioWriter::writeSamples(std::uint64_t endIndex, void const* interleavedPcm, std::size_t sampleFrames, std::size_t deckLinkChannels,
         std::span<int const> channelMap, config::AudioSampleType sampleType)
     {
-        // §3.4 SDK requirement: batches must stay below half the ring.
-        if (sampleFrames > _configInfo.continuous.bufferLength / 2)
+        if (_maxWriteLength == 0 || sampleFrames > endIndex)
         {
             return MXL_ERR_INVALID_ARG;
         }
 
-        mxlMutableWrappedMultiBufferSlice slices{};
-        auto status = ::mxlFlowWriterOpenSamples(_writer, endIndex, sampleFrames, &slices);
-        if (status != MXL_STATUS_OK)
+        // OpenSamples addresses `count` samples ending at `index`. A DeckLink
+        // packet can be larger than one legal write, so split it.
+        auto const bytesPerSample = sampleType == config::AudioSampleType::Int32 ? sizeof(std::int32_t) : sizeof(std::int16_t);
+        auto const* cursor = static_cast<std::uint8_t const*>(interleavedPcm);
+        std::uint64_t const start = endIndex - sampleFrames;
+        std::size_t remaining = sampleFrames;
+        while (remaining > 0)
         {
-            return status;
+            auto const count = remaining < _maxWriteLength ? remaining : _maxWriteLength;
+            auto const head = start + (sampleFrames - remaining) + count;
+            mxlMutableWrappedMultiBufferSlice slices{};
+            auto const status = ::mxlFlowWriterOpenSamples(_writer, head, count, &slices);
+            if (status != MXL_STATUS_OK)
+            {
+                return status;
+            }
+            if (sampleType == config::AudioSampleType::Int32)
+            {
+                util::deinterleaveInt32ToFloatMapped(reinterpret_cast<std::int32_t const*>(cursor), count, deckLinkChannels, channelMap, slices);
+            }
+            else
+            {
+                util::deinterleaveInt16ToFloatMapped(reinterpret_cast<std::int16_t const*>(cursor), count, deckLinkChannels, channelMap, slices);
+            }
+            auto const committed = ::mxlFlowWriterCommitSamples(_writer);
+            if (committed != MXL_STATUS_OK)
+            {
+                return committed;
+            }
+            cursor += count * deckLinkChannels * bytesPerSample;
+            remaining -= count;
         }
-
-        if (sampleType == config::AudioSampleType::Int32)
-        {
-            util::deinterleaveInt32ToFloatMapped(static_cast<std::int32_t const*>(interleavedPcm), sampleFrames, deckLinkChannels, channelMap,
-                slices);
-        }
-        else
-        {
-            util::deinterleaveInt16ToFloatMapped(static_cast<std::int16_t const*>(interleavedPcm), sampleFrames, deckLinkChannels, channelMap,
-                slices);
-        }
-
-        return ::mxlFlowWriterCommitSamples(_writer);
+        return MXL_STATUS_OK;
     }
 }

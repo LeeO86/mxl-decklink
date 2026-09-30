@@ -22,6 +22,15 @@ namespace mxldl::mxlbridge
             _reader = nullptr;
             throw std::runtime_error("mxlFlowReaderGetConfigInfo (audio " + _flowId + ") failed");
         }
+        std::size_t maxRead = 0;
+        if (::mxlFlowReaderGetMaxReadLengthSamples(_reader, &maxRead) == MXL_STATUS_OK && maxRead > 0)
+        {
+            _maxReadLength = maxRead;
+        }
+        else
+        {
+            _maxReadLength = _configInfo.continuous.bufferLength / 2;
+        }
     }
 
     AudioReader::~AudioReader()
@@ -35,19 +44,35 @@ namespace mxldl::mxlbridge
     mxlStatus AudioReader::readSamples(std::uint64_t endIndex, std::size_t sampleFrames, std::uint64_t timeoutNs, void* dst,
         std::size_t deckLinkChannels, std::span<int const> channelMap, config::AudioSampleType sampleType)
     {
-        mxlWrappedMultiBufferSlice slices{};
-        auto const status = ::mxlFlowReaderGetSamples(_reader, endIndex, sampleFrames, timeoutNs, &slices);
-        if (status != MXL_STATUS_OK)
+        if (_maxReadLength == 0 || sampleFrames > endIndex)
         {
-            return status;
+            return MXL_ERR_INVALID_ARG;
         }
-        if (sampleType == config::AudioSampleType::Int32)
+
+        auto const bytesPerSample = sampleType == config::AudioSampleType::Int32 ? sizeof(std::int32_t) : sizeof(std::int16_t);
+        auto* cursor = static_cast<std::uint8_t*>(dst);
+        std::uint64_t const start = endIndex - sampleFrames;
+        std::size_t remaining = sampleFrames;
+        while (remaining > 0)
         {
-            util::interleaveFloatToInt32Mapped(slices, sampleFrames, channelMap, deckLinkChannels, static_cast<std::int32_t*>(dst));
-        }
-        else
-        {
-            util::interleaveFloatToInt16Mapped(slices, sampleFrames, channelMap, deckLinkChannels, static_cast<std::int16_t*>(dst));
+            auto const count = remaining < _maxReadLength ? remaining : _maxReadLength;
+            auto const head = start + (sampleFrames - remaining) + count;
+            mxlWrappedMultiBufferSlice slices{};
+            auto const status = ::mxlFlowReaderGetSamples(_reader, head, count, timeoutNs, &slices);
+            if (status != MXL_STATUS_OK)
+            {
+                return status;
+            }
+            if (sampleType == config::AudioSampleType::Int32)
+            {
+                util::interleaveFloatToInt32Mapped(slices, count, channelMap, deckLinkChannels, reinterpret_cast<std::int32_t*>(cursor));
+            }
+            else
+            {
+                util::interleaveFloatToInt16Mapped(slices, count, channelMap, deckLinkChannels, reinterpret_cast<std::int16_t*>(cursor));
+            }
+            cursor += count * deckLinkChannels * bytesPerSample;
+            remaining -= count;
         }
         return MXL_STATUS_OK;
     }
