@@ -41,6 +41,10 @@ namespace mxldl::channel
         if (entry.cfg.direction == config::Direction::Input)
         {
             entry.input = std::make_unique<InputChannel>(_globalCfg, entry.cfg, sub, _domain, _metrics, idLabel);
+            if (_runtimeFlows)
+            {
+                entry.input->setRuntimeFlowsHandler(_runtimeFlows);
+            }
             entry.input->start();
         }
         else
@@ -112,6 +116,9 @@ namespace mxldl::channel
 
     std::variant<ChannelManager::ApplyResult, std::string> ChannelManager::applyChannels(std::vector<config::ChannelConfig> const& channels)
     {
+        ApplyResult result;
+        std::function<void(std::vector<config::ChannelConfig> const&)> listener;
+        {
         std::lock_guard const lock{_mutex};
 
         for (auto const& ch : channels)
@@ -121,8 +128,6 @@ namespace mxldl::channel
                 return *err;
             }
         }
-
-        ApplyResult result;
 
         // Removed channels.
         for (auto it = _entries.begin(); it != _entries.end();)
@@ -173,7 +178,37 @@ namespace mxldl::channel
             }
         }
 
+        listener = _channelsChanged;
+        }
+        if (listener)
+        {
+            listener(channels);
+        }
         return result;
+    }
+
+    std::vector<config::ChannelConfig> ChannelManager::channelConfigs() const
+    {
+        std::lock_guard const lock{_mutex};
+        std::vector<config::ChannelConfig> out;
+        out.reserve(_entries.size());
+        for (auto const& [idx, entry] : _entries)
+        {
+            out.push_back(entry.cfg);
+        }
+        return out;
+    }
+
+    void ChannelManager::setRuntimeFlowsHandler(std::function<void(int, InputChannel::RuntimeFlows const&)> handler)
+    {
+        std::lock_guard const lock{_mutex};
+        _runtimeFlows = std::move(handler);
+    }
+
+    void ChannelManager::setChannelsChangedHandler(std::function<void(std::vector<config::ChannelConfig> const&)> handler)
+    {
+        std::lock_guard const lock{_mutex};
+        _channelsChanged = std::move(handler);
     }
 
     void ChannelManager::housekeeping()

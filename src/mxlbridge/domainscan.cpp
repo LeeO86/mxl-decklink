@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include <random>
+#include <stdexcept>
 
 #include <fcntl.h>
 #include <picojson/picojson.h>
@@ -352,7 +353,7 @@ namespace mxldl::mxlbridge
                 return "cannot write " + (target / kDomainDefFile).string();
             }
             out << "{\n  \"id\": \"" << id.toString() << "\",\n  \"label\": \"" << log::jsonEscape(request.label) << "\",\n  \"description\": \""
-                << log::jsonEscape(request.description) << "\"\n}\n";
+                << log::jsonEscape(request.description) << "\",\n  \"tags\": {}\n}\n";
         }
         if (request.historyDurationNs)
         {
@@ -376,5 +377,41 @@ namespace mxldl::mxlbridge
                 {"tmpfs", result.isTmpfs},
             });
         return result;
+    }
+
+    std::string ensureDomainId(std::string const& domainPath)
+    {
+        fs::path const dir(domainPath);
+        if (auto const existing = readJsonObject(dir / kDomainDefFile))
+        {
+            if (auto const id = getString(*existing, "id"))
+            {
+                if (util::parseUuid(*id))
+                {
+                    return *id;
+                }
+            }
+        }
+
+        util::Uuid seed{};
+        seed.bytes[6] = 0x40;
+        seed.bytes[8] = 0x80;
+        seed.bytes[15] = 0x4d;
+        std::error_code ec;
+        auto const canon = fs::weakly_canonical(dir, ec);
+        auto const id = util::deriveUuid(seed, ec ? dir.string() : canon.string());
+
+        std::error_code mk;
+        fs::create_directories(dir, mk);
+        std::ofstream out(dir / kDomainDefFile, std::ios::trunc);
+        if (!out)
+        {
+            throw std::runtime_error("cannot write domain_def.json in " + dir.string());
+        }
+        auto const label = dir.filename().string();
+        out << "{\n  \"id\": \"" << id.toString() << "\",\n  \"label\": \"" << log::jsonEscape(label)
+            << "\",\n  \"description\": \"MXL domain\",\n  \"tags\": {}\n}\n";
+        log::info("mxl_domain_id_created", {{"path", dir.string()}, {"id", id.toString()}});
+        return id.toString();
     }
 }

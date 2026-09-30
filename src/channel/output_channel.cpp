@@ -114,6 +114,18 @@ namespace mxldl::channel
         std::size_t attempt = 0;
         while (_running.load())
         {
+            if (!_cfg.videoMxlActive)
+            {
+                // IS-05 master_enable is false: hold the sub-device idle until
+                // a later activation restarts this channel.
+                setState(State::Init);
+                while (_running.load())
+                {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                }
+                return;
+            }
+
             if (!_streamingUp.load())
             {
                 if (attempt > 0)
@@ -179,7 +191,7 @@ namespace mxldl::channel
                     });
                 return false;
             }
-            _videoReader = std::make_unique<mxlbridge::VideoReader>(_domain, _cfg.videoFlowId.toString());
+            _videoReader = std::make_unique<mxlbridge::VideoReader>(readerDomain(), _cfg.videoFlowId.toString());
             _audioFlows.clear();
             if (_cfg.audioEnable)
             {
@@ -188,9 +200,9 @@ namespace mxldl::channel
                 {
                     AudioFlowReader slot;
                     slot.cfg = afCfg;
-                    if (!afCfg.flowId.isNil())
+                    if (!afCfg.flowId.isNil() && afCfg.mxlActive)
                     {
-                        slot.reader = std::make_unique<mxlbridge::AudioReader>(_domain, afCfg.flowId.toString());
+                        slot.reader = std::make_unique<mxlbridge::AudioReader>(readerDomain(), afCfg.flowId.toString());
                     }
                     // Nil UUID = unassigned: mapped DeckLink channels stay silent.
                     _audioFlows.push_back(std::move(slot));
@@ -482,6 +494,19 @@ namespace mxldl::channel
             // silence so DeckLink audio clock stays filled.
             _playback->scheduleAudio(pcm, static_cast<std::uint32_t>(_samplesPerFrame));
         }
+    }
+
+    mxlbridge::Domain& OutputChannel::readerDomain()
+    {
+        if (!_cfg.readerDomainPath.empty() && _cfg.readerDomainPath != _domain.path())
+        {
+            if (!_foreignDomain || _foreignDomain->path() != _cfg.readerDomainPath)
+            {
+                _foreignDomain = std::make_unique<mxlbridge::Domain>(_cfg.readerDomainPath);
+            }
+            return *_foreignDomain;
+        }
+        return _domain;
     }
 
     void OutputChannel::housekeeping()

@@ -59,10 +59,13 @@ namespace mxldl::channel
         bool scheduleGrain(std::uint64_t grainIndex);
         void prerollResetRequested();
 
+        [[nodiscard]] mxlbridge::Domain& readerDomain();
+
         config::Config const& _globalCfg;
         config::ChannelConfig _cfg;
         dl::ISubDevice& _subDevice;
         mxlbridge::Domain& _domain;
+        std::unique_ptr<mxlbridge::Domain> _foreignDomain;
         std::string _cardIdLabel;
 
         Status _status;

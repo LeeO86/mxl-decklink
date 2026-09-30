@@ -76,6 +76,10 @@ namespace mxldl::mxlbridge
     /// the path escapes `scanRoot` or a domain already exists there.
     std::variant<CreateDomainResult, std::string> createDomain(CreateDomainRequest const& request, std::string const& scanRoot);
 
+    /// Reads `domain_def.json` in `domainPath`. When the file is missing, writes
+    /// one with a path-stable UUID (BCP-007-03 domain identity). Returns the id.
+    std::string ensureDomainId(std::string const& domainPath);
+
     /// True when `path` resolves (via weakly_canonical) to `root` or a
     /// subdirectory of it. Rejects `..` traversal and non-segment prefix
     /// matches (e.g. `/dev/shm-evil` does not count as under `/dev/shm`).

@@ -607,7 +607,9 @@ namespace mxldl::config
                a.domainPath == b.domainPath && a.timestampSource == b.timestampSource && a.hugepagePath == b.hugepagePath &&
                a.cpuPinList == b.cpuPinList && a.realtimePriority == b.realtimePriority && a.rtSched == b.rtSched &&
                a.ptpInterface == b.ptpInterface && a.webEnable == b.webEnable &&
-               a.webPort == b.webPort && a.domainScanPath == b.domainScanPath && a.minHealthyChannels == b.minHealthyChannels &&
+               a.webPort == b.webPort && a.nmosEnable == b.nmosEnable && a.nmosPort == b.nmosPort && a.nmosLabel == b.nmosLabel &&
+               a.nmosRegistryAddress == b.nmosRegistryAddress && a.nmosRegistryPort == b.nmosRegistryPort &&
+               a.domainScanPath == b.domainScanPath && a.minHealthyChannels == b.minHealthyChannels &&
                a.signalLossTimeoutS == b.signalLossTimeoutS && a.startupMaxRetries == b.startupMaxRetries &&
                a.shutdownTimeoutS == b.shutdownTimeoutS && a.logLevel == b.logLevel && a.logFormat == b.logFormat && a.libMode == b.libMode &&
                a.backend == b.backend;
@@ -760,6 +762,31 @@ namespace mxldl::config
         if (auto const v = env.get("WEB_PORT"))
         {
             cfg.webPort = parseInt("WEB_PORT", *v, 1, 65535);
+        }
+        if (auto const v = env.get("NMOS_ENABLE"))
+        {
+            cfg.nmosEnable = parseBool("NMOS_ENABLE", *v);
+        }
+        if (auto const v = env.get("NMOS_PORT"))
+        {
+            cfg.nmosPort = parseInt("NMOS_PORT", *v, 1, 65535);
+        }
+        if (auto const v = env.get("NMOS_LABEL"))
+        {
+            cfg.nmosLabel = *v;
+        }
+        if (auto const v = env.get("NMOS_REGISTRY_ADDRESS"))
+        {
+            cfg.nmosRegistryAddress = *v;
+        }
+        if (auto const v = env.get("NMOS_REGISTRY_PORT"))
+        {
+            cfg.nmosRegistryPort = parseInt("NMOS_REGISTRY_PORT", *v, 1, 65535);
+        }
+        if (cfg.nmosEnable && (cfg.nmosPort == cfg.webPort || cfg.nmosPort + 1 == cfg.webPort))
+        {
+            fail("NMOS_PORT (" + std::to_string(cfg.nmosPort) + " and " + std::to_string(cfg.nmosPort + 1) +
+                 ") overlaps WEB_PORT (" + std::to_string(cfg.webPort) + ")");
         }
         if (env.has("HEALTH_PORT") || env.has("METRICS_PORT"))
         {

@@ -70,6 +70,9 @@ namespace mxldl::config
         int channelCount = 2; // MXL flow channel count (1..64)
         std::vector<int> deckLinkChannels; // size == channelCount; DeckLink indices
         std::string label;
+        /// IS-05 master_enable for this audio leg. False stops the MXL read/write
+        /// without forgetting `flowId` (BCP-007-03).
+        bool mxlActive = true;
 
         bool operator==(AudioFlowConfig const&) const = default;
     };
@@ -91,6 +94,13 @@ namespace mxldl::config
         util::Uuid videoFlowId{};
         std::vector<AudioFlowConfig> audioFlows;
         std::optional<util::Uuid> ancFlowId;
+        /// IS-05 master_enable for the video leg and the ANC leg (BCP-007-03).
+        /// False parks an output (no playback) and skips that input writer.
+        bool videoMxlActive = true;
+        bool ancMxlActive = true;
+        /// Output channels: MXL domain directory to read, when it is not
+        /// `MXL_DOMAIN_PATH`. Empty means the process domain.
+        std::string readerDomainPath;
         std::string videoFlowLabel; // defaulted at validation
         std::string groupHint;
         std::optional<util::Uuid> deviceId;
@@ -134,6 +144,13 @@ namespace mxldl::config
         // the mutating API; health/metrics are always served.
         bool webEnable = true;
         int webPort = 8080;
+        /// Optional BCP-007-03 NMOS node (IS-04 v1.3 + IS-05 v1.2). The binary
+        /// must be built with MXL_DECKLINK_NMOS; otherwise NMOS_ENABLE is rejected.
+        bool nmosEnable = false;
+        int nmosPort = 3212;
+        std::string nmosLabel;
+        std::string nmosRegistryAddress;
+        int nmosRegistryPort = 3210;
         std::optional<std::string> configFile; // §4.5
         std::string domainScanPath = "/dev/shm"; // §7.6
         int minHealthyChannels = 1;

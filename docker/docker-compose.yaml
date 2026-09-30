@@ -89,6 +89,11 @@ services:
       MXL_HEALTH_MIN_HEALTHY_CHANNELS: "2"
       LOG_LEVEL: info
       LOG_FORMAT: json
+      # BCP-007-03 NMOS node. The image must be built with -DMXL_DECKLINK_NMOS=ON
+      # (Sony nmos-cpp). Publish 3212 and 3213 as well when this is enabled.
+      # NMOS_ENABLE: "true"
+      # NMOS_PORT: "3212"
+      # NMOS_REGISTRY_ADDRESS: nmos-registry.example
 
       CH0_DIRECTION: input
       CH0_SUBDEVICE_INDEX: "0"

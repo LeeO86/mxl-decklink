@@ -318,32 +318,35 @@ namespace mxldl::channel
     {
         std::lock_guard const lock{_writerMutex};
 
-        mxlbridge::VideoFlowParams vp;
-        vp.id = videoId;
-        vp.label = _cfg.videoFlowLabel.empty() ? _cardIdLabel + "-ch" + std::to_string(_cfg.index) + "-video" : _cfg.videoFlowLabel;
-        vp.description = "mxl-decklink input channel " + std::to_string(_cfg.index) + " video";
-        vp.groupHint = _cfg.groupHint + ":Video";
-        vp.sourceId = _cfg.sourceId;
-        vp.deviceId = _cfg.deviceId;
-        vp.width = mode.width;
-        vp.height = mode.height;
-        vp.rateNumerator = mode.rateNumerator;
-        vp.rateDenominator = mode.rateDenominator;
-        vp.interlaced = mode.interlaced;
-        vp.withAlpha = _cfg.pixelFormat == config::PixelFormat::YUVA10;
-        _videoWriter = std::make_unique<mxlbridge::VideoWriter>(_domain, vp, _cfg.commitBatchHintVideo);
-
-        // §4.2 deviation note (IMPLEMENTATION_PLAN.md §3): the actual ring
-        // depth is governed by the domain history duration in MXL v1.0.1.
-        if (static_cast<int>(_videoWriter->actualGrainCount()) != _cfg.effectiveGrainCount())
+        if (_cfg.videoMxlActive && !videoId.isNil())
         {
-            log::warn("grain_count_differs",
-                {
-                    {"channel_index", _cfg.index},
-                    {"requested", _cfg.effectiveGrainCount()},
-                    {"actual", _videoWriter->actualGrainCount()},
-                    {"details", "ring depth is set by the domain history duration (options.json) in MXL v1.0.1"},
-                });
+            mxlbridge::VideoFlowParams vp;
+            vp.id = videoId;
+            vp.label = _cfg.videoFlowLabel.empty() ? _cardIdLabel + "-ch" + std::to_string(_cfg.index) + "-video" : _cfg.videoFlowLabel;
+            vp.description = "mxl-decklink input channel " + std::to_string(_cfg.index) + " video";
+            vp.groupHint = _cfg.groupHint + ":Video";
+            vp.sourceId = _cfg.sourceId;
+            vp.deviceId = _cfg.deviceId;
+            vp.width = mode.width;
+            vp.height = mode.height;
+            vp.rateNumerator = mode.rateNumerator;
+            vp.rateDenominator = mode.rateDenominator;
+            vp.interlaced = mode.interlaced;
+            vp.withAlpha = _cfg.pixelFormat == config::PixelFormat::YUVA10;
+            _videoWriter = std::make_unique<mxlbridge::VideoWriter>(_domain, vp, _cfg.commitBatchHintVideo);
+
+            // §4.2 deviation note (IMPLEMENTATION_PLAN.md §3): the actual ring
+            // depth is governed by the domain history duration in MXL v1.0.1.
+            if (static_cast<int>(_videoWriter->actualGrainCount()) != _cfg.effectiveGrainCount())
+            {
+                log::warn("grain_count_differs",
+                    {
+                        {"channel_index", _cfg.index},
+                        {"requested", _cfg.effectiveGrainCount()},
+                        {"actual", _videoWriter->actualGrainCount()},
+                        {"details", "ring depth is set by the domain history duration (options.json) in MXL v1.0.1"},
+                    });
+            }
         }
 
         _audioFlows.clear();
@@ -354,9 +357,9 @@ namespace mxldl::channel
             {
                 auto const& afCfg = _cfg.audioFlows[i];
                 util::Uuid const id = (i < audioIds.size()) ? audioIds[i] : afCfg.flowId;
-                if (id.isNil())
+                if (id.isNil() || !afCfg.mxlActive)
                 {
-                    continue; // inputs reject nil at config time; defensive skip
+                    continue; // nil rejected at config time; mxlActive is the IS-05 master_enable
                 }
                 mxlbridge::AudioFlowParams ap;
                 ap.id = id;
@@ -375,7 +378,7 @@ namespace mxldl::channel
             }
         }
 
-        if (_cfg.ancEnable && ancId)
+        if (_cfg.ancEnable && _cfg.ancMxlActive && ancId && !ancId->isNil())
         {
             mxlbridge::AncFlowParams np;
             np.id = *ancId;
@@ -389,8 +392,9 @@ namespace mxldl::channel
             _ancWriter = std::make_unique<mxlbridge::AncWriter>(_domain, np);
         }
 
-        _writersValid.store(true);
-        _flowWriterActive->set(1);
+        bool const anyWriter = static_cast<bool>(_videoWriter) || !_audioFlows.empty() || static_cast<bool>(_ancWriter);
+        _writersValid.store(anyWriter);
+        _flowWriterActive->set(anyWriter ? 1 : 0);
     }
 
     void InputChannel::destroyWriters()
@@ -442,19 +446,31 @@ namespace mxldl::channel
 
         if (!_writersValid.load(std::memory_order_acquire))
         {
-            return; // format change in progress (§3.8)
+            return; // format change in progress (§3.8), or every MXL leg is disabled
         }
         // The hot path must never block behind the format-change path.
         std::unique_lock lock{_writerMutex, std::try_to_lock};
-        if (!lock.owns_lock() || !_videoWriter)
+        if (!lock.owns_lock())
         {
             return;
         }
 
         auto const tai = frameTimestampTai(video);
-        auto const rate = _videoWriter->grainRate();
+        mxlRational rate{_currentMode.rateNumerator, _currentMode.rateDenominator};
+        if (_videoWriter)
+        {
+            rate = _videoWriter->grainRate();
+        }
         auto const grainIndex = ::mxlTimestampToIndex(&rate, tai);
 
+        if (!_videoWriter)
+        {
+            _framesTotal->inc();
+            _status.framesTotal.fetch_add(1);
+            _status.lastFrameTaiNs.store(tai);
+        }
+        else
+        {
         // Video grain (§2.3): one memcpy for v210; expansion for 8-bit.
         auto const commitStart = util::taiNowNs();
         mxlStatus status;
@@ -487,6 +503,7 @@ namespace mxldl::channel
         }
         _framesTotal->inc();
         _status.framesTotal.fetch_add(1);
+        }
 
         // Audio (§3.4): deinterleave + float conversion into each mapped flow.
         if (audio != nullptr && !_audioFlows.empty())
@@ -618,6 +635,23 @@ namespace mxldl::channel
         _audioIndexValid = false;
         _status.setActiveVideoFlowId(newVideoId.toString());
 
+        if (_runtimeFlows)
+        {
+            RuntimeFlows flows;
+            flows.videoId = newVideoId.toString();
+            flows.mode = fc.newMode;
+            flows.audioIds.reserve(newAudioIds.size());
+            for (std::size_t i = 0; i < newAudioIds.size() && i < _cfg.audioFlows.size(); ++i)
+            {
+                flows.audioIds.emplace_back(_cfg.audioFlows[i].index, newAudioIds[i].toString());
+            }
+            if (newAncId)
+            {
+                flows.ancId = newAncId->toString();
+            }
+            _runtimeFlows(_cfg.index, flows);
+        }
+
         // §3.8: the new flow UUID is announced via a structured log event and
         // the mxl_active_video_flow_id info metric (see health.cpp).
         log::info("video_flow_replaced",
@@ -629,6 +663,11 @@ namespace mxldl::channel
                 {"previous_flow_id", _cfg.videoFlowId.toString()},
             });
         setState(State::Healthy);
+    }
+
+    void InputChannel::setRuntimeFlowsHandler(std::function<void(int, RuntimeFlows const&)> handler)
+    {
+        _runtimeFlows = std::move(handler);
     }
 
     void InputChannel::housekeeping()

@@ -36,6 +36,12 @@ MXL v1.0.1 API rather than the spec's paraphrase of it).
   `restart_required`. Unauthenticated by design — keep it on protected
   networks or set `WEB_ENABLE=false` (health/metrics remain). Structured JSON
   logging.
+- **NMOS (optional build)**: with `-DMXL_DECKLINK_NMOS=ON` and `NMOS_ENABLE=true`
+  the process is an AMWA IS-04 v1.3 / IS-05 v1.2 node for MXL
+  ([BCP-007-03](https://specs.amwa.tv/bcp-007-03/)). Input channels are MXL
+  senders, output channels are MXL receivers (`urn:x-nmos:transport:mxl`).
+  A controller connects them with `mxl_domain_id` and `mxl_flow_id`; there is
+  no SDP. This is separate from a DeckLink IP card's own ST 2110 NMOS node.
 - **Config**: environment variables, optionally layered over a JSON
   configuration file (`MXL_CONFIG_FILE`, spec §4.5) that the web interface
   persists to. Precedence: env > file > default; env-set keys are shown
@@ -63,6 +69,33 @@ cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
   "-DCMAKE_PREFIX_PATH=/opt/mxl;$(pwd)/../mxl/build/vcpkg_installed/x64-linux"
 cmake --build build -j
 ```
+
+### NMOS node (BCP-007-03)
+
+The NMOS node links [sony/nmos-cpp](https://github.com/sony/nmos-cpp) `master`
+(the tree that contains the MXL transport; the older Conan Center package does
+not). Dependencies are Boost, the C++ REST SDK, OpenSSL, and Avahi's
+`libdns_sd` compatibility library. Pass the `Development` directory:
+
+```bash
+cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DMXL_DECKLINK_NMOS=ON \
+  -DNMOS_CPP_DIR=/path/to/nmos-cpp/Development \
+  "-DCMAKE_PREFIX_PATH=/opt/mxl;$(pwd)/../mxl/build/vcpkg_installed/x64-linux"
+cmake --build build -j
+```
+
+Run with `NMOS_ENABLE=true`. The Node and Connection APIs listen on
+`NMOS_PORT` (default 3212); WebSocket subscriptions use the next port. Point
+`NMOS_REGISTRY_ADDRESS` at an IS-04 registry, or leave it empty to discover
+one with DNS-SD (Avahi). `NMOS_PORT` must not overlap `WEB_PORT`.
+
+Senders write the domain in `MXL_DOMAIN_PATH` (its `domain_def.json` `id` is
+`mxl_domain_id`). Receivers may read any domain discovered under
+`MXL_DOMAIN_SCAN_PATH`. `master_enable` starts and stops that leg's MXL
+writer or reader. A format change on an input mints a new flow UUID and
+updates the sender's IS-04 Flow and active `mxl_flow_id`.
+
 
 The Blackmagic **DeckLink interface headers** are vendored under
 `third_party/decklink/` (the same Blackmagic-licensed copies GStreamer
