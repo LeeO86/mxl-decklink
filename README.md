@@ -88,10 +88,39 @@ cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
 cmake --build build -j
 ```
 
-Run with `NMOS_ENABLE=true`. The Node and Connection APIs listen on
-`NMOS_PORT` (default 3212); WebSocket subscriptions use the next port. Point
-`NMOS_REGISTRY_ADDRESS` at an IS-04 registry, or leave it empty to discover
-one with DNS-SD (Avahi). `NMOS_PORT` must not overlap `WEB_PORT`.
+Run with `NMOS_ENABLE=true`. Point `NMOS_REGISTRY_ADDRESS` at an IS-04
+registry, or leave it empty to discover one with DNS-SD (Avahi, below).
+
+**Ports.** The web UI, REST API, health, and metrics stay on `WEB_PORT`
+(default 8080). That is this process's own HTTP server. The NMOS HTTP APIs
+share a second listener, `NMOS_PORT` (default 3212): Node, Connection, and
+Events. IS-04/IS-05 subscriptions use a WebSocket listener on `NMOS_PORT + 1`
+(3213). nmos-cpp binds those as two sockets. Putting the WebSocket on
+`NMOS_PORT` as well drops the HTTP APIs: clients then get `426 Upgrade
+Required` from the WebSocket listener. `NMOS_PORT` and `NMOS_PORT + 1` must
+not collide with `WEB_PORT`.
+
+**DNS-SD.** Leave `NMOS_REGISTRY_ADDRESS` empty only when an `avahi-daemon`
+is reachable on the system D-Bus and mDNS (UDP 5353) can leave the host.
+Docker bridge networks and typical Kubernetes CNIs do not forward mDNS, so
+the process logs `DNSServiceCreateConnection` errors and does not register.
+Unicast registration needs no daemon: set `NMOS_REGISTRY_ADDRESS` (and
+`NMOS_REGISTRY_PORT`, default 3210) and keep the published ports above.
+
+Docker, using the host's Avahi (the host must already run `avahi-daemon`):
+
+```yaml
+network_mode: host
+volumes:
+  - /run/dbus:/run/dbus
+  - /run/avahi-daemon:/run/avahi-daemon
+```
+
+`ports:` is ignored with host networking; the process binds 8080, 3212, and
+3213 on the host. The same two sockets are what a Kubernetes pod needs, plus
+`hostNetwork: true` and `dnsPolicy: ClusterFirstWithHostNet`, because the
+pod otherwise has no multicast path to the LAN. `deploy/mxl-decklink.yaml`
+is the unicast layout and does not set `hostNetwork`.
 
 Senders write the domain in `MXL_DOMAIN_PATH` (its `domain_def.json` `id` is
 `mxl_domain_id`). Receivers may read any domain discovered under
@@ -117,7 +146,8 @@ CI publishes the container to GitHub Container Registry
 | `git-<sha>` | every published build, for pinning |
 
 The image includes the BCP-007-03 node. Set `NMOS_ENABLE=true` to serve it
-(Node API on `NMOS_PORT`, default 3212; WebSocket on the next port).
+on `NMOS_PORT` (default 3212) with WebSocket subscriptions on the next port.
+See "NMOS node" below for Avahi / DNS-SD.
 
 Or build the container image (multi-stage, builds MXL and nmos-cpp internally):
 

@@ -76,7 +76,10 @@ services:
       # Consolidated HTTP port (§7.1): web UI, /api, /livez /readyz /statusz, /metrics.
       # Protected operations networks only — the UI is unauthenticated (§7.5.5).
       - "8080:8080"
-      # BCP-007-03 Node API and the WebSocket subscription port beside it.
+      # NMOS HTTP (Node, Connection, Events) and the WebSocket listener
+      # nmos-cpp opens beside it. See README "NMOS node" for why these
+      # cannot share a port, and for host networking + Avahi when DNS-SD
+      # is used instead of NMOS_REGISTRY_ADDRESS.
       - "3212:3212"
       - "3213:3213"
     environment:
@@ -92,7 +95,11 @@ services:
       MXL_HEALTH_MIN_HEALTHY_CHANNELS: "2"
       LOG_LEVEL: info
       LOG_FORMAT: json
-      # BCP-007-03 node (linked into the image). Empty registry address uses DNS-SD.
+      # BCP-007-03 node (linked into the image). Set NMOS_REGISTRY_ADDRESS
+      # for unicast registration. DNS-SD needs avahi-daemon on the host,
+      # network_mode: host, and mounts of /run/dbus and /run/avahi-daemon
+      # (README "NMOS node"). An empty address on this bridge network
+      # cannot advertise the node.
       NMOS_ENABLE: "true"
       NMOS_PORT: "3212"
       # NMOS_REGISTRY_ADDRESS: nmos-registry.example
