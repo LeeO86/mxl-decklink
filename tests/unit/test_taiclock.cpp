@@ -45,6 +45,22 @@ TEST_CASE("recalibration above the gate is rejected with the old offset kept (§
     CHECK(cal.toTai(tai) == tai); // old offset still in force
 }
 
+TEST_CASE("a repeated delta above the gate in the same direction is applied")
+{
+    HardwareClockCalibrator cal;
+    std::uint64_t const tai = 1'000'000'000'000ULL;
+    cal.calibrate(tai, tai); // offset 0
+    // Free-running card clock: 5 ms per interval in the same direction.
+    CHECK_FALSE(cal.calibrate(tai, tai + 5'000'000).has_value());
+    auto const stepped = cal.calibrate(tai, tai + 10'000'000);
+    REQUIRE(stepped.has_value());
+    CHECK(*stepped == 10'000'000);
+    CHECK(cal.toTai(tai) == tai + 10'000'000);
+    // A jump back the other way is a new glitch: rejected again.
+    CHECK_FALSE(cal.calibrate(tai, tai + 4'000'000).has_value());
+    CHECK(cal.toTai(tai) == tai + 10'000'000);
+}
+
 TEST_CASE("rolling recalibration interval (§3.5: 60 s)")
 {
     HardwareClockCalibrator cal(60'000'000'000ULL, 1'000'000ULL);

@@ -27,7 +27,11 @@ namespace mxldl::util
         {
             auto const delta = newOffset - _offsetNs;
             auto const magnitude = static_cast<std::uint64_t>(delta < 0 ? -delta : delta);
-            if (magnitude > _maxStepNs)
+            // A second delta above the gate in the same direction is steady drift
+            // (card clock not locked to PTP), not a glitch: step to it. Rejecting
+            // it forever lets the timestamps run away (seen: 315 s after 6 weeks).
+            bool const drifting = _rejectedDeltaNs != 0 && (_rejectedDeltaNs < 0) == (delta < 0);
+            if (magnitude > _maxStepNs && !drifting)
             {
                 // §3.5: deltas above the gate indicate drift/discontinuity on
                 // non-genlocked systems; warn instead of stepping timestamps.
@@ -36,9 +40,19 @@ namespace mxldl::util
                         {"delta_ns", delta},
                         {"max_step_ns", _maxStepNs},
                     });
+                _rejectedDeltaNs = delta;
                 _lastCalibrationTai = taiNow;
                 return std::nullopt;
             }
+            if (magnitude > _maxStepNs)
+            {
+                log::warn("hw_clock_recalibration_stepped",
+                    {
+                        {"delta_ns", delta},
+                        {"max_step_ns", _maxStepNs},
+                    });
+            }
+            _rejectedDeltaNs = 0;
             _offsetNs = newOffset;
             _lastCalibrationTai = taiNow;
             return delta;

@@ -316,9 +316,20 @@ Documented in detail in IMPLEMENTATION_PLAN.md §3:
 
 ## Pre-go-live checks (hardware required, spec §9)
 
-- DeckLink IP 100G sub-device enumeration against a real card.
+- DeckLink IP 100G sub-device enumeration against a real card. Done 2026-10-03, see below.
 - MXL handle thread-safety confirmation with the MXL maintainers.
-- Empirical resource sizing on target hardware (the §6.3 table is estimates).
+- Empirical resource sizing on target hardware (the §6.3 table is estimates). One data point below.
+
+### Lab run 2026-10-03: DeckLink IP 100G
+
+Host: Ubuntu 24.04, kernel 6.8, Desktop Video 16.1 (API 16.1, `hostmount`), 2× Xeon Gold 6136, chrony with TAI offset 37 s, image built from this repository (1.0.0 plus the clock fix in the CHANGELOG).
+
+- Enumeration: one card, persistent id `0x84ef8e60`, eight sub-devices `DeckLink IP 100G (1)`…`(8)` with persistent ids `0x84ef8e60`…`0x84ef8e67` and the same group id. Each reports capture, playback and format detection, no profile manager. PCIe Gen3 x8. `MXL_DECKLINK_CARD_ID=0x84ef8e60` selects it.
+- Channels: three 1080p50 inputs (sub-devices 0, 2, 7, format detection, 16 DeckLink audio channels, one stereo flow, ANC) and one 1080p50 output (sub-device 1) fed by mxl-test-player through IS-05 (video and 16-channel audio).
+- 3 minutes: 9003 frames per channel (50.0 fps), 0 dropped, 0 late output frames, output reader lag 0. `grain_commit_latency_seconds` mean 1.27 ms, p95 at or below 2.5 ms (`MXL_TIMESTAMP_SOURCE=hardware`). Process 0.62 cores and 1.5 GB RSS.
+- The card was not locked to PTP (`reference_locked: false` on every sub-device). The 2110 inputs dropped together every 20–35 s during part of the run (all three `signal_lost` at the same time), and the hardware clock drifted about 5 ms per minute against TAI.
+- Spec §3.6 says loss of PTP lock on the IP 100G degrades readiness and sets `mxl_ptp_locked=0`. Neither exists: input channels stay `healthy`, `/readyz` stays 200, and there is no PTP metric. Open.
+- An output channel whose `CHx_MXL_VIDEO_FLOW_ID` is set in the environment only finds that flow in this function's own domain (`mxlCreateFlowReader` status 2 for a flow of another domain). Route outputs with IS-05; then the flow is found under `MXL_DOMAIN_SCAN_PATH`.
 
 ## License
 
