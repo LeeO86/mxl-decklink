@@ -45,14 +45,25 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
             type=raw,value=nightly-dev,enable=${{ !startsWith(github.ref, 'refs/tags/') }}
-            type=sha,prefix=git-
-          # `latest` only on semver release tags, never on nightly builds.
+            type=sha,prefix=git-,format=short
           flavor: |
-            latest=${{ startsWith(github.ref, 'refs/tags/') }}
+            latest=false
           labels: |
             org.opencontainers.image.title=mxl-decklink
             org.opencontainers.image.description=MXL MediaFunction container for Blackmagic DeckLink
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.licenses=MIT
+
+      - name: Resolve MXL revision
+        id: mxlrev
+        run: |
+          # Peeled tag commit. v1.1.0 is the MXL release this image builds.
+          rev=$(git ls-remote https://github.com/dmf-mxl/mxl.git 'refs/tags/v1.1.0^{}' | awk '{print $1}')
+          if [ -z "$rev" ]; then
+            rev=$(git ls-remote https://github.com/dmf-mxl/mxl.git refs/tags/v1.1.0 | awk '{print $1}')
+          fi
+          echo "rev=$rev" >> "$GITHUB_OUTPUT"
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -67,6 +78,7 @@ jobs:
           # Without it the image expects DECKLINK_LIB_MODE=hostmount.
           build-args: |
             DESKTOPVIDEO_DEB_URL=${{ secrets.DESKTOPVIDEO_DEB_URL }}
+            MXL_REVISION=${{ steps.mxlrev.outputs.rev }}
           # The build stage compiles vcpkg deps + MXL and runs the unit tests;
           # the GHA layer cache keeps repeat builds fast.
           cache-from: type=gha

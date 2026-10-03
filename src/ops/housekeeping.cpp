@@ -56,7 +56,7 @@ namespace mxldl::ops
                     {"direction", config::directionName(v.cfg.direction)},
                     {"flow_id", v.activeVideoFlowId},
                 };
-                _metrics.gauge("mxl_active_video_flow_id", "Active video flow UUID (info metric, value is always 1)", labels).set(1.0);
+                _metrics.gauge("mxl_decklink_active_video_flow_id", "Active video flow UUID (info metric, value is always 1)", labels).set(1.0);
             }
 
             // §2.2/mxl.h: periodic stale-flow garbage collection (~60 s).

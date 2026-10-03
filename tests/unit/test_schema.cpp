@@ -26,10 +26,13 @@ TEST_CASE("channel key parsing")
 
 TEST_CASE("setting lookup for global and channel keys")
 {
-    auto const g = lookupSetting("MXL_DOMAIN_PATH");
+    auto const g = lookupSetting("MXL_OUTPUT_DOMAIN_DIR");
     REQUIRE(g.has_value());
     CHECK(g->kind == SettingKind::Global);
-    CHECK(g->defaultValue == "/dev/shm/mxl");
+    CHECK(g->defaultValue == "/Volumes/mxl/mxl-decklink");
+    auto const alias = lookupSetting("MXL_DOMAIN_PATH");
+    REQUIRE(alias.has_value());
+    CHECK(alias->defaultValue.empty());
 
     auto const c = lookupSetting("CH0_VIDEO_MODE");
     REQUIRE(c.has_value());

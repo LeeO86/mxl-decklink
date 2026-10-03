@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24 FATAL_ERROR)
 
 project(mxl-decklink
-    VERSION 1.1.0
+    VERSION 1.0.0
     DESCRIPTION "MXL MediaFunction container for Blackmagic DeckLink"
     LANGUAGES CXX
 )
@@ -115,6 +115,7 @@ add_library(mxl-decklink-core STATIC
     src/util/audioconv.cpp
     src/util/anc.cpp
     src/util/uuid.cpp
+    src/util/hostaddr.cpp
     src/util/threading.cpp
     src/mxlbridge/domain.cpp
     src/mxlbridge/domainscan.cpp

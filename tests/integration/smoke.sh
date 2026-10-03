@@ -187,16 +187,16 @@ done
 
 metrics=$(curl -s --max-time 3 "http://127.0.0.1:$WEB_PORT/metrics")
 echo "$metrics" | grep -q 'mxl_decklink_frames_total{.*channel_label="smoke-in".*}' || fail "frames_total metric missing"
-echo "$metrics" | grep -q 'mxl_grains_committed_total' || fail "grains_committed metric missing"
-echo "$metrics" | grep -q 'mxl_flow_grain_commit_latency_seconds_bucket' || fail "commit latency histogram missing"
-echo "$metrics" | grep -q 'mxl_active_video_flow_id' || fail "active flow info metric missing"
+echo "$metrics" | grep -q 'mxl_decklink_grains_committed_total' || fail "grains_committed metric missing"
+echo "$metrics" | grep -q 'mxl_decklink_grain_commit_latency_seconds_bucket' || fail "commit latency histogram missing"
+echo "$metrics" | grep -q 'mxl_decklink_active_video_flow_id' || fail "active flow info metric missing"
 frames_metric=$(echo "$metrics" | grep 'mxl_decklink_frames_total' | grep 'smoke-in' | awk '{print $NF}')
 python3 - "$frames_metric" <<'EOF' || fail "frames_total metric not > 0"
 import sys
 raise SystemExit(0 if float(sys.argv[1]) > 0 else 1)
 EOF
 
-say "test 3: graceful shutdown exits 0 within the grace period"
+say "test 3: graceful shutdown exits 143 within the grace period"
 kill -TERM "$PID"
 shutdown_ok=1
 for _ in $(seq 1 100); do
@@ -211,7 +211,7 @@ if (( shutdown_ok != 0 )); then
 else
     wait "$PID"
     rc=$?
-    [[ $rc == 0 ]] || fail "expected exit 0 on SIGTERM, got $rc"
+    [[ $rc == 143 ]] || fail "expected exit 143 on SIGTERM, got $rc"
 fi
 PID=""
 
@@ -304,7 +304,7 @@ grep -q '"event":"video_flow_replaced"' "$LOG3" || fail "video_flow_replaced eve
 kill -TERM "$PID" 2>/dev/null
 wait "$PID" 2>/dev/null
 rc=$?
-[[ $rc == 0 ]] || fail "format-change run: expected exit 0 on SIGTERM, got $rc"
+[[ $rc == 143 ]] || fail "format-change run: expected exit 143 on SIGTERM, got $rc"
 PID=""
 
 # ---------------------------------------------------------------------------
@@ -400,7 +400,7 @@ curl -s --max-time 5 -X PUT "http://127.0.0.1:$WEB_PORT/api/config" -d '{"set":{
 kill -TERM "$PID" 2>/dev/null
 wait "$PID" 2>/dev/null
 rc=$?
-[[ $rc == 0 ]] || fail "web run: expected exit 0 on SIGTERM, got $rc"
+[[ $rc == 143 ]] || fail "web run: expected exit 143 on SIGTERM, got $rc"
 PID=""
 rm -rf "$CONFDIR"
 rm -f "$LOG" "$LOG2" "$LOG3" "$LOG4"

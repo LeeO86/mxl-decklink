@@ -131,5 +131,5 @@ kill -TERM "$PID"
 wait "$PID"
 rc=$?
 PID=""
-[[ "$rc" == 0 ]] || fail "expected exit 0 on SIGTERM, got $rc"
+[[ "$rc" == 143 ]] || fail "expected exit 143 on SIGTERM, got $rc"
 say "passed"

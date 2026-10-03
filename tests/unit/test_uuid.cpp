@@ -25,6 +25,13 @@ TEST_CASE("malformed uuids rejected")
     CHECK_FALSE(parseUuid("5fbec3b11b0f-417d-9059-8b94a47197ed0").has_value());
 }
 
+TEST_CASE("uuid v5 matches the RFC 4122 DNS example")
+{
+    auto const id = uuidV5(uuidNamespaceDns(), "www.example.com");
+    CHECK(id.toString() == "2ed6657d-e927-568b-95e1-2665a8aea6a2");
+    CHECK((id.bytes[6] & 0xf0) == 0x50);
+}
+
 TEST_CASE("derived uuids are deterministic, distinct and well-formed (§3.8)")
 {
     auto const base = *parseUuid("5fbec3b1-1b0f-417d-9059-8b94a47197ed");

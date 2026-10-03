@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -21,9 +22,18 @@ namespace mxldl::nmosnode
         Node(Node const&) = delete;
         Node& operator=(Node const&) = delete;
 
+        /// Called after an IS-05 activation changes channel configuration, so
+        /// the caller can persist it under CONFIG_DIR.
+        void setPersist(std::function<void()> persist);
+
         /// Binds the Node and Connection APIs and registers with a registry when
         /// one is configured. Throws std::runtime_error on bind or setup failure.
         void start();
+
+        /// True after the Registration API has accepted this node.
+        [[nodiscard]] bool registered() const;
+
+        /// Removes node resources so nmos-cpp sends Registration DELETEs, then stops.
         void stop();
 
     private:

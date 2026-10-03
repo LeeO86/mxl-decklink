@@ -34,7 +34,7 @@ services:
     # host. MXL flows are plain files in the shared tmpfs: every cooperating
     # container must be able to read AND write them, so all MXL media
     # functions on a host should agree on one uid/gid (or a shared group) for
-    # the domain. The image's built-in user is 10001; mxl-hands-on examples
+    # the domain. The image's built-in user is 1000; mxl-hands-on examples
     # and the fstab line above use 1000:1000.
     user: "1000:1000"
     # DeckLink device nodes are typically root:video mode 0660. Primary gid

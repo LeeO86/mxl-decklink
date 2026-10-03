@@ -19,6 +19,11 @@ namespace mxldl::ops
         _lastHeartbeatTai.store(util::taiNowNs());
     }
 
+    void HealthService::setReadyGate(std::function<bool()> gate)
+    {
+        _readyGate = std::move(gate);
+    }
+
     HttpResponse HealthService::metricsText()
     {
         return {200, "text/plain; version=0.0.4; charset=utf-8", _metrics.render()};
@@ -39,6 +44,10 @@ namespace mxldl::ops
     HttpResponse HealthService::readyz()
     {
         auto const healthy = _channels.healthyCount();
+        if (_readyGate && !_readyGate())
+        {
+            return {503, "text/plain; charset=utf-8", "nmos node is not registered\n"};
+        }
         if (healthy >= _cfg.minHealthyChannels)
         {
             return {200, "text/plain; charset=utf-8", "ok\n"};

@@ -90,6 +90,37 @@ TEST_CASE("NMOS legs are stable and activations retarget one MXL flow")
     std::filesystem::remove_all(domainDir);
 }
 
+TEST_CASE("NMOS_SEED ids are stable and independent of the card id")
+{
+    auto cfg = config::loadConfig(envOf({
+        {"NMOS_SEED", "sport-sa-decklink"},
+        {"CH0_DIRECTION", "input"},
+        {"CH0_SUBDEVICE_INDEX", "0"},
+        {"CH0_VIDEO_MODE", "HD1080p50"},
+        {"CH0_AUDIO_ENABLE", "false"},
+        {"CH0_MXL_VIDEO_FLOW_ID", "5fbec3b1-1b0f-417d-9059-8b94a47197ed"},
+    }));
+    auto const a = nmosroute::nodeIdFor(cfg, 1);
+    auto const b = nmosroute::nodeIdFor(cfg, 2);
+    CHECK(a == b);
+    CHECK(a == nmosroute::idFromSeed("sport-sa-decklink", "node"));
+    CHECK(nmosroute::idFromSeed("sport-sa-decklink", "node") != nmosroute::idFromSeed("sport-sa-decklink", "device"));
+}
+
+TEST_CASE("adoptOutputDomain refuses to overwrite a different id")
+{
+    namespace fs = std::filesystem;
+    auto const root = fs::temp_directory_path() / ("mxldl-adopt-" + std::to_string(::getpid()));
+    fs::create_directories(root);
+    auto const created = mxlbridge::adoptOutputDomain({root.string(), "11111111-1111-4111-8111-111111111111", std::nullopt});
+    CHECK(created == "11111111-1111-4111-8111-111111111111");
+    auto const again = mxlbridge::adoptOutputDomain({root.string(), std::nullopt, 50'000'000ULL});
+    CHECK(again == created);
+    CHECK(fs::exists(root / "options.json"));
+    CHECK_THROWS_AS(mxlbridge::adoptOutputDomain({root.string(), "22222222-2222-4222-8222-222222222222", std::nullopt}), std::runtime_error);
+    fs::remove_all(root);
+}
+
 TEST_CASE("ensureDomainId writes a stable domain_def.json")
 {
     namespace fs = std::filesystem;

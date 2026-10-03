@@ -5,6 +5,7 @@
 #include <sstream>
 #include <system_error>
 #include <unordered_map>
+#include <variant>
 
 #include <picojson/picojson.h>
 
@@ -179,11 +180,25 @@ namespace mxldl::ops
             {
                 return _health.metricsText();
             }
+            if (req.path == "/api/v1/config/export" && req.method == "GET")
+            {
+                return jsonResponse(200, _store.exportDocument());
+            }
+            if (req.path == "/api/v1/config/import" && req.method == "POST")
+            {
+                auto const saved = _store.importDocument(req.body);
+                if (auto const* err = std::get_if<std::string>(&saved))
+                {
+                    return jsonError(400, *err);
+                }
+                _restartRequired.store(true);
+                return jsonResponse(200, "{\"restart_required\":true}");
+            }
 
             // UI + API only with WEB_ENABLE=true (§7.5.5).
             if (!_activeCfg.webEnable)
             {
-                return jsonError(404, "web interface disabled (WEB_ENABLE=false); available endpoints: /livez /readyz /statusz /metrics");
+                return jsonError(404, "web interface disabled (WEB_ENABLE=false); available endpoints: /livez /readyz /statusz /metrics /api/v1/config/export /api/v1/config/import");
             }
             if (req.path == "/" || req.path == "/index.html")
             {

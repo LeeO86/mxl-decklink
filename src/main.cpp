@@ -5,7 +5,14 @@
 #include <chrono>
 #include <csignal>
 #include <cstdlib>
+#include <filesystem>
+#include <map>
 #include <thread>
+
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #include <mxl/mxl.h>
 
@@ -13,8 +20,11 @@
 #include "config/config.hpp"
 #include "config/store.hpp"
 #include "decklink/devicemanager.hpp"
+#include "nmos/routing.hpp"
 #include "mxlbridge/domain.hpp"
+#include "mxlbridge/domainscan.hpp"
 #include "ops/health.hpp"
+#include "util/hostaddr.hpp"
 #include "ops/housekeeping.hpp"
 #include "ops/metrics.hpp"
 #include "ops/webapi.hpp"
@@ -39,6 +49,22 @@ namespace
     void signalHandler(int sig)
     {
         g_signalReceived.store(sig);
+    }
+
+    bool tcpPortAccepts(int port)
+    {
+        int const fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        if (fd < 0)
+        {
+            return false;
+        }
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(static_cast<std::uint16_t>(port));
+        ::inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+        int const rc = ::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+        ::close(fd);
+        return rc == 0;
     }
 
     /// Card-level startup with exponential backoff (§3.10: initial 1 s, max
@@ -92,7 +118,28 @@ int main()
         return kExitConfig;
     }
 
-    mxldl::log::configure(mxldl::log::parseLevel(cfg.logLevel), mxldl::log::parseFormat(cfg.logFormat));
+        mxldl::log::configure(mxldl::log::parseLevel(cfg.logLevel), mxldl::log::parseFormat(cfg.logFormat));
+
+        if (cfg.nmosEnable && cfg.nmosHostAddress.empty())
+        {
+            if (auto const ip = mxldl::util::firstNonLoopbackIpv4())
+            {
+                cfg.nmosHostAddress = *ip;
+            }
+            else
+            {
+                mxldl::log::error("config_invalid",
+                    {{"details", "NMOS_HOST_ADDRESS is unset and this host has no non-loopback IPv4 address to announce"}});
+                return kExitConfig;
+            }
+        }
+        if (!cfg.outputDomainId.empty() || !cfg.nmosSeed.empty())
+        {
+            if (cfg.outputDomainId.empty() && !cfg.nmosSeed.empty())
+            {
+                cfg.outputDomainId = mxldl::nmosroute::idFromSeed(cfg.nmosSeed, "domain");
+            }
+        }
 
 #ifndef MXL_DECKLINK_NMOS
     if (cfg.nmosEnable)
@@ -121,7 +168,18 @@ int main()
     int exitCode = kExitOk;
     try
     {
-        // §3.10 step 2: MXL instance.
+        // §3.10 step 2: own output domain, then the MXL instance.
+        try
+        {
+            cfg.outputDomainId = mxldl::mxlbridge::adoptOutputDomain(
+                {cfg.domainPath, cfg.outputDomainId.empty() ? std::nullopt : std::optional<std::string>(cfg.outputDomainId), cfg.historyDurationNs});
+        }
+        catch (std::exception const& e)
+        {
+            auto const message = std::string(e.what());
+            mxldl::log::error(message.rfind("domain_id_mismatch:", 0) == 0 ? "domain_id_mismatch" : "mxl_domain_failed", {{"details", message}});
+            return message.rfind("domain_id_mismatch:", 0) == 0 ? kExitConfig : kExitTempFail;
+        }
         std::unique_ptr<mxldl::mxlbridge::Domain> domain;
         try
         {
@@ -140,7 +198,7 @@ int main()
         {
             if (g_signalReceived.load() != 0)
             {
-                return kExitOk;
+                return kExitForced;
             }
             // First-deploy / no-hardware path: keep the web UI reachable so
             // operators can finish configuration. Prefer the mock card when
@@ -194,17 +252,61 @@ int main()
         mxldl::channel::ChannelManager channels(cfg, *card, *domain, metrics);
 
         mxldl::ops::HealthService health(cfg, channels, metrics);
+        bool const registrationRequired = cfg.nmosEnable && (!cfg.nmosRegistryAddress.empty() || cfg.nmosDnsSd);
+#ifdef MXL_DECKLINK_NMOS
+        std::unique_ptr<mxldl::nmosnode::Node> nmosNode;
+#endif
+        if (registrationRequired)
+        {
+            health.setReadyGate([&] {
+#ifdef MXL_DECKLINK_NMOS
+                return nmosNode && nmosNode->registered();
+#else
+                return false;
+#endif
+            });
+        }
 
         mxldl::ops::Housekeeping housekeeping(cfg, channels, *domain, health, metrics);
         housekeeping.start();
 
 #ifdef MXL_DECKLINK_NMOS
-        std::unique_ptr<mxldl::nmosnode::Node> nmosNode;
         if (cfg.nmosEnable)
         {
             try
             {
                 nmosNode = std::make_unique<mxldl::nmosnode::Node>(cfg, channels, card->persistentId(), card->displayName());
+                nmosNode->setPersist([&] {
+                    std::map<std::string, std::optional<std::string>> changes;
+                    for (auto const& ch : channels.channelConfigs())
+                    {
+                        auto const prefix = "CH" + std::to_string(ch.index) + "_";
+                        auto consider = [&](std::string const& key, std::string const& value) {
+                            if (store->sourceOf(key) == mxldl::config::SettingSource::Env)
+                            {
+                                return;
+                            }
+                            changes[key] = value;
+                        };
+                        consider(prefix + "MXL_VIDEO_FLOW_ID", ch.videoFlowId.toString());
+                        consider(prefix + "MXL_ACTIVE", ch.videoMxlActive ? "true" : "false");
+                        for (auto const& af : ch.audioFlows)
+                        {
+                            auto const afPrefix = prefix + "AF" + std::to_string(af.index) + "_";
+                            consider(afPrefix + "FLOW_ID", af.flowId.toString());
+                            consider(afPrefix + "MXL_ACTIVE", af.mxlActive ? "true" : "false");
+                        }
+                    }
+                    if (changes.empty())
+                    {
+                        return;
+                    }
+                    auto const saved = store->update(changes);
+                    if (std::holds_alternative<std::string>(saved))
+                    {
+                        mxldl::log::warn("nmos_activation_persist_failed", {{"details", std::get<std::string>(saved)}});
+                    }
+                });
                 nmosNode->start();
             }
             catch (std::exception const& e)
@@ -229,6 +331,13 @@ int main()
             return kExitTempFail;
         }
 
+        if (!tcpPortAccepts(cfg.webPort) || (cfg.nmosEnable && (!tcpPortAccepts(cfg.nmosPort) || !tcpPortAccepts(cfg.nmosPort + 1))))
+        {
+            mxldl::log::error("port_bind_failed",
+                {{"details", "a configured TCP port is not accepting connections"}, {"web_port", cfg.webPort}, {"nmos_port", cfg.nmosPort}});
+            return kExitTempFail;
+        }
+
         mxldl::log::info("running",
             {
                 {"port", cfg.webPort},
@@ -250,6 +359,7 @@ int main()
         else
         {
             mxldl::log::info("shutdown_signal", {{"signal", g_signalReceived.load()}});
+            exitCode = kExitForced;
         }
 
         // §3.10 staged shutdown bounded by SHUTDOWN_TIMEOUT_S; a watchdog
@@ -268,21 +378,43 @@ int main()
             }
         });
 
+        channels.stopAll(); // stop media and release MXL writers/readers
+        mxldl::log::debug("shutdown_stage", {{"stage", "channels_stopped"}});
 #ifdef MXL_DECKLINK_NMOS
         if (nmosNode)
         {
-            nmosNode->stop();
+            nmosNode->stop(); // erase registry resources, then shut the node down
             nmosNode.reset();
         }
 #endif
-        channels.stopAll(); // steps 1–4: stop streams, flush, disable, release writers/readers
-        mxldl::log::debug("shutdown_stage", {{"stage", "channels_stopped"}});
         web.stop();
         housekeeping.stop();
         mxldl::log::debug("shutdown_stage", {{"stage", "ops_stopped"}});
-        domain.reset(); // step 5: mxlDestroyInstance
+        auto const domainPath = domain->path();
+        domain.reset(); // mxlDestroyInstance
         mxldl::log::debug("shutdown_stage", {{"stage", "mxl_destroyed"}});
-        card.reset(); // step 6: release DeckLink refs
+        if (cfg.cleanupOnExit && exitCode == kExitForced)
+        {
+            auto const scan = cfg.domainScanPath;
+            if (domainPath == scan || domainPath == "/" || std::filesystem::path(domainPath).filename().empty())
+            {
+                mxldl::log::error("mxl_cleanup_refused", {{"path", domainPath}, {"details", "refusing to remove the scan root or an empty path"}});
+            }
+            else
+            {
+                std::error_code ec;
+                std::filesystem::remove_all(domainPath, ec);
+                if (ec)
+                {
+                    mxldl::log::error("mxl_cleanup_failed", {{"path", domainPath}, {"details", ec.message()}});
+                }
+                else
+                {
+                    mxldl::log::info("mxl_domain_removed", {{"path", domainPath}});
+                }
+            }
+        }
+        card.reset();
 
         shutdownDone.store(true);
         watchdog.join();

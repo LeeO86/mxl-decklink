@@ -4,6 +4,27 @@ This document describes how `SPECIFICATION.md` (v1.1) is implemented in this rep
 module boundaries, technology choices, deliberate deviations (with reasons), and the
 verification strategy. It was written before the code and kept in sync with it.
 
+## Platform guideline G1–G14
+
+| Id | Requirement | Status | Evidence |
+|---|---|---|---|
+| G1 | Env, then file, then defaults; exit 78; one settings table; state under `/config`; no secrets | met | `src/config/config.cpp`, `src/config/store.cpp`, `SPECIFICATION.md` §4.1 |
+| G2 | Scan path `/Volumes/mxl`; own output domain; do not overwrite a foreign id; `history_duration` once | met | `src/mxlbridge/domainscan.cpp` `adoptOutputDomain` |
+| G3 | `NMOS_SEED` UUIDv5, `NMOS_LABEL`, `NMOS_TAGS`; group hints kept | met | `src/nmos/routing.cpp` `idFromSeed`, `src/nmos/node.cpp` `addPlatformTags` |
+| G4 | Registry and query ports; `NMOS_DNS_SD` default false disables browse and advertise | met | `src/nmos/node.cpp` `pri` / `highest_pri` |
+| G5 | Announce `NMOS_HOST_ADDRESS` only; no hostname or loopback | met | `src/main.cpp`, `src/util/hostaddr.cpp` |
+| G6 | Ports from env; WebSocket is `NMOS_PORT+1`; bind failure exits 75 | met | `src/main.cpp` `tcpPortAccepts`, `src/ops/httpserver.cpp` |
+| G7 | `/livez`, `/readyz` includes registration, `/metrics` prefix `mxl_decklink_` | met | `src/ops/health.cpp` |
+| G8 | SIGTERM exits 143, deregisters, optional domain removal | met | `src/main.cpp`, `src/nmos/node.cpp` `Node::stop` |
+| G9 | IS-05 BCP-007-03; active connection persisted when not env-pinned | met | `src/nmos/node.cpp`, `CHx_MXL_ACTIVE` |
+| G10 | `GET/POST /api/v1/config/export` and `import`; no secrets stored | met | `src/ops/webapi.cpp`, `src/config/store.cpp` |
+| G11 | GHCR tags `git-<sha7>`, `nightly-dev`, semver; uid 1000; OCI labels | met | `.github/workflows/container.yaml`, `docker/Dockerfile` |
+| G12 | `deploy/` pod network, probes, grace, hostPath, `/config`, no hostIPC | met | `deploy/mxl-decklink.yaml` |
+| G13 | README, CHANGELOG 1.0.0, spec matches code | met | `README.md`, `CHANGELOG.md`, `SPECIFICATION.md` |
+| G14 | Unit tests and lifecycle integration test | met | `tests/unit/test_config.cpp`, `tests/integration/platform-lifecycle.sh` |
+
+N/A: SDP, ICE, and SRT addresses (this function does not speak those transports). The DeckLink card's own ST 2110 NMOS node is not this process and is not registered with the platform registry.
+
 ## 1. Ground rules and technology choices
 
 - **Language / toolchain:** C++20, CMake ≥ 3.24, GCC ≥ 12 or Clang ≥ 16. No exceptions
@@ -150,7 +171,7 @@ The abstraction is intentionally thin (value types + 3 interfaces) so the hot pa
 - **Dockerfile** (multi-stage, `ubuntu:24.04`): stage 1 builds MXL v1.1.0 (vcpkg
   manifest, `Linux-GCC-Release` preset) and Sony nmos-cpp, then this application
   with `MXL_DECKLINK_NMOS=ON`; stage 2 is the slim runtime (including the
-  nmos-cpp shared libraries) with a non-root user (uid 10001, group `video`),
+  nmos-cpp shared libraries) with a non-root user (uid 1000, group `video`),
   the entrypoint validating `/dev/blackmagic` + `${MXL_DOMAIN_PATH}`, and optional
   Desktop Video installation via build-arg (`DECKLINK_LIB_MODE=bundled`) or host
   bind-mount (`hostmount`).

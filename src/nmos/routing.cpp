@@ -26,6 +26,15 @@ namespace mxldl::nmosroute
             return util::deriveUuid(seed, name).toString();
         }
 
+        std::string idNamed(config::Config const& cfg, std::uint32_t cardPersistentId, std::string const& name)
+        {
+            if (!cfg.nmosSeed.empty())
+            {
+                return idFromSeed(cfg.nmosSeed, name);
+            }
+            return idFor(cardSeed(cardPersistentId), name);
+        }
+
         config::ChannelConfig* findChannel(std::vector<config::ChannelConfig>& channels, int index)
         {
             for (auto& ch : channels)
@@ -56,14 +65,23 @@ namespace mxldl::nmosroute
         return idFor(cardSeed(cardPersistentId), name);
     }
 
+    std::string idFromSeed(std::string const& seed, std::string const& name)
+    {
+        return util::uuidV5(util::uuidNamespaceDns(), "mxl-decklink/" + seed + "/" + name).toString();
+    }
+
     std::string nodeIdForCard(std::uint32_t cardPersistentId)
     {
         return stableId(cardPersistentId, "node");
     }
 
+    std::string nodeIdFor(config::Config const& cfg, std::uint32_t cardPersistentId)
+    {
+        return idNamed(cfg, cardPersistentId, "node");
+    }
+
     std::vector<Leg> enumerateLegs(config::Config const& cfg, std::uint32_t cardPersistentId)
     {
-        auto const seed = cardSeed(cardPersistentId);
         std::vector<Leg> legs;
         for (auto const& ch : cfg.channels)
         {
@@ -72,11 +90,11 @@ namespace mxldl::nmosroute
             auto const prefix = "ch" + std::to_string(ch.index) + "/";
 
             Leg video;
-            video.id = idFor(seed, role + "/" + prefix + "video");
+            video.id = idNamed(cfg, cardPersistentId, role + "/" + prefix + "video");
             video.channelIndex = ch.index;
             video.kind = LegKind::Video;
             video.sender = sender;
-            video.sourceId = idFor(seed, "source/" + prefix + "video");
+            video.sourceId = idNamed(cfg, cardPersistentId, "source/" + prefix + "video");
             video.initialFlowId = ch.videoFlowId.toString();
             legs.push_back(std::move(video));
 
@@ -86,12 +104,12 @@ namespace mxldl::nmosroute
                 {
                     auto const key = prefix + "audio" + std::to_string(af.index);
                     Leg audio;
-                    audio.id = idFor(seed, role + "/" + key);
+                    audio.id = idNamed(cfg, cardPersistentId, role + "/" + key);
                     audio.channelIndex = ch.index;
                     audio.kind = LegKind::Audio;
                     audio.audioIndex = af.index;
                     audio.sender = sender;
-                    audio.sourceId = idFor(seed, "source/" + key);
+                    audio.sourceId = idNamed(cfg, cardPersistentId, "source/" + key);
                     audio.initialFlowId = af.flowId.toString();
                     legs.push_back(std::move(audio));
                 }
@@ -100,11 +118,11 @@ namespace mxldl::nmosroute
             if (ch.ancEnable && ch.ancFlowId)
             {
                 Leg anc;
-                anc.id = idFor(seed, role + "/" + prefix + "anc");
+                anc.id = idNamed(cfg, cardPersistentId, role + "/" + prefix + "anc");
                 anc.channelIndex = ch.index;
                 anc.kind = LegKind::Anc;
                 anc.sender = sender;
-                anc.sourceId = idFor(seed, "source/" + prefix + "anc");
+                anc.sourceId = idNamed(cfg, cardPersistentId, "source/" + prefix + "anc");
                 anc.initialFlowId = ch.ancFlowId->toString();
                 legs.push_back(std::move(anc));
             }

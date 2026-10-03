@@ -82,3 +82,6 @@ jobs:
 
       - name: NMOS node smoke test (BCP-007-03)
         run: LD_LIBRARY_PATH=/opt/mxl/lib tests/integration/nmos-smoke.sh build/mxl-decklink
+
+      - name: Platform lifecycle (ready, deregister, domain cleanup)
+        run: LD_LIBRARY_PATH=/opt/mxl/lib tests/integration/platform-lifecycle.sh build/mxl-decklink

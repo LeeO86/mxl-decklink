@@ -51,9 +51,9 @@ namespace mxldl::channel
         _framesLate = &metrics.counter("mxl_decklink_frames_late_total", "Frames displayed late", labels);
         _reconnectTotal = &metrics.counter("mxl_decklink_reconnect_total", "Channel reconnect attempts", labels);
         _stateGauge = &metrics.gauge("mxl_decklink_channel_state", "Channel state (0=init 1=healthy 2=degraded 3=failed)", labels);
-        _bufferedVideoGauge = &metrics.gauge("mxl_buffered_video_frames", "Frames buffered in the device", labels);
-        _bufferedAudioGauge = &metrics.gauge("mxl_buffered_audio_samples", "Audio sample frames buffered in the device", labels);
-        _readerLagGauge = &metrics.gauge("mxl_ringbuffer_reader_lag_grains", "Reader lag behind the flow head in grains", labels);
+        _bufferedVideoGauge = &metrics.gauge("mxl_decklink_buffered_video_frames", "Frames buffered in the device", labels);
+        _bufferedAudioGauge = &metrics.gauge("mxl_decklink_buffered_audio_samples", "Audio sample frames buffered in the device", labels);
+        _readerLagGauge = &metrics.gauge("mxl_decklink_reader_lag_grains", "Reader lag behind the flow head in grains", labels);
     }
 
     OutputChannel::~OutputChannel()

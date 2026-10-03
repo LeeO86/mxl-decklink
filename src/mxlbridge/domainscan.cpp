@@ -379,39 +379,71 @@ namespace mxldl::mxlbridge
         return result;
     }
 
-    std::string ensureDomainId(std::string const& domainPath)
+    std::string adoptOutputDomain(OutputDomainSpec const& spec)
     {
-        fs::path const dir(domainPath);
+        fs::path const dir(spec.path);
         if (auto const existing = readJsonObject(dir / kDomainDefFile))
         {
-            if (auto const id = getString(*existing, "id"))
+            auto const id = getString(*existing, "id");
+            if (!id || !util::parseUuid(*id))
             {
-                if (util::parseUuid(*id))
+                throw std::runtime_error("domain_def.json in " + dir.string() + " has no usable id; refusing to overwrite it");
+            }
+            if (spec.id && *spec.id != *id)
+            {
+                throw std::runtime_error("domain_id_mismatch: " + dir.string() + " already has id " + *id + " (configured " + *spec.id + ")");
+            }
+            if (spec.historyDurationNs && !fs::exists(dir / kOptionsFile))
+            {
+                std::ofstream opts(dir / kOptionsFile, std::ios::trunc);
+                if (opts)
                 {
-                    return *id;
+                    opts << "{\n  \"" << kHistoryOption << "\": " << *spec.historyDurationNs << "\n}\n";
                 }
             }
+            return *id;
         }
 
-        util::Uuid seed{};
-        seed.bytes[6] = 0x40;
-        seed.bytes[8] = 0x80;
-        seed.bytes[15] = 0x4d;
-        std::error_code ec;
-        auto const canon = fs::weakly_canonical(dir, ec);
-        auto const id = util::deriveUuid(seed, ec ? dir.string() : canon.string());
+        std::string id = spec.id.value_or("");
+        if (id.empty())
+        {
+            util::Uuid seed{};
+            seed.bytes[6] = 0x40;
+            seed.bytes[8] = 0x80;
+            seed.bytes[15] = 0x4d;
+            std::error_code ec;
+            auto const canon = fs::weakly_canonical(dir, ec);
+            id = util::deriveUuid(seed, ec ? dir.string() : canon.string()).toString();
+        }
 
         std::error_code mk;
         fs::create_directories(dir, mk);
+        if (mk || !fs::is_directory(dir))
+        {
+            throw std::runtime_error("cannot create MXL domain directory " + dir.string() + (mk ? (" (" + mk.message() + ")") : ""));
+        }
         std::ofstream out(dir / kDomainDefFile, std::ios::trunc);
         if (!out)
         {
             throw std::runtime_error("cannot write domain_def.json in " + dir.string());
         }
         auto const label = dir.filename().string();
-        out << "{\n  \"id\": \"" << id.toString() << "\",\n  \"label\": \"" << log::jsonEscape(label)
+        out << "{\n  \"id\": \"" << id << "\",\n  \"label\": \"" << log::jsonEscape(label)
             << "\",\n  \"description\": \"MXL domain\",\n  \"tags\": {}\n}\n";
-        log::info("mxl_domain_id_created", {{"path", dir.string()}, {"id", id.toString()}});
-        return id.toString();
+        if (spec.historyDurationNs)
+        {
+            std::ofstream opts(dir / kOptionsFile, std::ios::trunc);
+            if (opts)
+            {
+                opts << "{\n  \"" << kHistoryOption << "\": " << *spec.historyDurationNs << "\n}\n";
+            }
+        }
+        log::info("mxl_domain_id_created", {{"path", dir.string()}, {"id", id}});
+        return id;
+    }
+
+    std::string ensureDomainId(std::string const& domainPath)
+    {
+        return adoptOutputDomain(OutputDomainSpec{domainPath, std::nullopt, std::nullopt});
     }
 }

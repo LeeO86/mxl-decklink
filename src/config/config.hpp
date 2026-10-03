@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -132,7 +133,14 @@ namespace mxldl::config
         std::optional<int> cardIndex;
 
         std::optional<CardProfile> cardProfile;
-        std::string domainPath = "/dev/shm/mxl";
+        /// Own output domain directory. `MXL_OUTPUT_DOMAIN_DIR`, with
+        /// `MXL_DOMAIN_PATH` kept as an alias.
+        std::string domainPath = "/Volumes/mxl/mxl-decklink";
+        /// Set when `MXL_OUTPUT_DOMAIN_ID` (or the NMOS seed) names the domain.
+        /// Empty until startup resolves `domain_def.json`.
+        std::string outputDomainId;
+        /// Written into options.json only when the file does not already exist.
+        std::optional<std::uint64_t> historyDurationNs;
         TimestampSourceCfg timestampSource = TimestampSourceCfg::Hardware;
         std::optional<std::string> hugepagePath;
         std::optional<std::vector<int>> cpuPinList;
@@ -149,10 +157,25 @@ namespace mxldl::config
         bool nmosEnable = false;
         int nmosPort = 3212;
         std::string nmosLabel;
+        /// UUIDv5 name. Empty keeps the legacy card-id identity.
+        std::string nmosSeed;
+        /// Tag name → values. Applied to the node and the device.
+        std::map<std::string, std::vector<std::string>> nmosTags;
         std::string nmosRegistryAddress;
         int nmosRegistryPort = 3210;
+        /// Empty means the registration address.
+        std::string nmosQueryAddress;
+        /// Negative means registration port + 1.
+        int nmosQueryPort = -1;
+        /// When false, DNS-SD browse and mDNS advertisement are both off.
+        bool nmosDnsSd = false;
+        /// IP literal announced in IS-04/IS-05. Empty means the first
+        /// non-loopback IPv4, resolved at startup when NMOS is enabled.
+        std::string nmosHostAddress;
         std::optional<std::string> configFile; // §4.5
-        std::string domainScanPath = "/dev/shm"; // §7.6
+        std::string configDir = "/config";
+        bool cleanupOnExit = false;
+        std::string domainScanPath = "/Volumes/mxl"; // §7.6
         int minHealthyChannels = 1;
         int signalLossTimeoutS = 30;
         int startupMaxRetries = 10;

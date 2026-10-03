@@ -169,15 +169,22 @@ TEST_CASE("unset removes file keys; env block renders the effective config")
     CHECK_FALSE(store.effectiveValue("CH0_LABEL").has_value());
 }
 
-TEST_CASE("no file layer: updates are rejected with a helpful message")
+TEST_CASE("default config file lives under CONFIG_DIR")
 {
+    TempDir tmp;
     auto env = baseEnv("");
     env.erase("MXL_CONFIG_FILE");
+    env["CONFIG_DIR"] = tmp.path.string();
     ConfigStore store(envOf(env));
-    CHECK_FALSE(store.hasFileLayer());
-    auto const rejected = store.update({{"CH0_LABEL", "x"}});
-    REQUIRE(std::holds_alternative<std::string>(rejected));
-    CHECK(std::get<std::string>(rejected).find("MXL_CONFIG_FILE") != std::string::npos);
+    CHECK(store.hasFileLayer());
+    CHECK(*store.filePath() == tmp.path.string() + "/mxl-decklink.json");
+    auto const saved = store.update({{"CH0_LABEL", "x"}});
+    REQUIRE(std::holds_alternative<ConfigStore::UpdateResult>(saved));
+    auto const exported = store.exportDocument();
+    CHECK(exported.find("CH0_LABEL") != std::string::npos);
+    auto const imported = store.importDocument("{\"settings\":{\"CH0_LABEL\":\"cam\"}}");
+    REQUIRE(std::holds_alternative<ConfigStore::UpdateResult>(imported));
+    CHECK(store.effectiveValue("CH0_LABEL") == "cam");
 }
 
 TEST_CASE("global part comparison drives restart_required (§7.5.3)")

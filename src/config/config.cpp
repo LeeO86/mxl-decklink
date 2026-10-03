@@ -6,6 +6,9 @@
 #include <set>
 #include <unordered_map>
 
+#include <picojson/picojson.h>
+
+#include "util/hostaddr.hpp"
 #include "util/threading.hpp"
 
 namespace mxldl::config
@@ -287,6 +290,10 @@ namespace mxldl::config
             {
                 fail(key("MXL_VIDEO_FLOW_ID") + ": input channels require a non-nil video flow UUID");
             }
+            if (auto const v = env.get(key("MXL_ACTIVE")))
+            {
+                ch.videoMxlActive = parseBool(key("MXL_ACTIVE"), *v);
+            }
 
             // Removed single-flow keys — reject so old configs fail loudly.
             if (env.has(key("MXL_AUDIO_FLOW_ID")) || env.has(key("MXL_AUDIO_FLOW_LABEL")))
@@ -379,6 +386,11 @@ namespace mxldl::config
                     else
                     {
                         flow.label = "ch" + std::to_string(index) + "-audio" + std::to_string(af + 1);
+                    }
+                    auto const activeName = prefix + "AF" + std::to_string(af) + "_MXL_ACTIVE";
+                    if (auto const v = env.get(activeName))
+                    {
+                        flow.mxlActive = parseBool(activeName, *v);
                     }
                     ch.audioFlows.push_back(std::move(flow));
                 }
@@ -608,7 +620,10 @@ namespace mxldl::config
                a.cpuPinList == b.cpuPinList && a.realtimePriority == b.realtimePriority && a.rtSched == b.rtSched &&
                a.ptpInterface == b.ptpInterface && a.webEnable == b.webEnable &&
                a.webPort == b.webPort && a.nmosEnable == b.nmosEnable && a.nmosPort == b.nmosPort && a.nmosLabel == b.nmosLabel &&
-               a.nmosRegistryAddress == b.nmosRegistryAddress && a.nmosRegistryPort == b.nmosRegistryPort &&
+               a.nmosSeed == b.nmosSeed && a.nmosTags == b.nmosTags && a.nmosRegistryAddress == b.nmosRegistryAddress &&
+               a.nmosRegistryPort == b.nmosRegistryPort && a.nmosQueryAddress == b.nmosQueryAddress && a.nmosQueryPort == b.nmosQueryPort &&
+               a.nmosDnsSd == b.nmosDnsSd && a.nmosHostAddress == b.nmosHostAddress && a.outputDomainId == b.outputDomainId &&
+               a.historyDurationNs == b.historyDurationNs && a.configDir == b.configDir && a.cleanupOnExit == b.cleanupOnExit &&
                a.domainScanPath == b.domainScanPath && a.minHealthyChannels == b.minHealthyChannels &&
                a.signalLossTimeoutS == b.signalLossTimeoutS && a.startupMaxRetries == b.startupMaxRetries &&
                a.shutdownTimeoutS == b.shutdownTimeoutS && a.logLevel == b.logLevel && a.logFormat == b.logFormat && a.libMode == b.libMode &&
@@ -716,6 +731,24 @@ namespace mxldl::config
         {
             cfg.domainPath = *v;
         }
+        if (auto const v = env.get("MXL_OUTPUT_DOMAIN_DIR"))
+        {
+            cfg.domainPath = *v;
+        }
+        if (auto const v = env.get("MXL_OUTPUT_DOMAIN_ID"))
+        {
+            auto const id = parseUuidOrFail("MXL_OUTPUT_DOMAIN_ID", *v);
+            if (id.isNil())
+            {
+                fail("MXL_OUTPUT_DOMAIN_ID: must be a non-nil UUID");
+            }
+            cfg.outputDomainId = id.toString();
+        }
+        if (auto const v = env.get("MXL_HISTORY_DURATION_MS"))
+        {
+            int const ms = parseInt("MXL_HISTORY_DURATION_MS", *v, 1, 60'000);
+            cfg.historyDurationNs = static_cast<std::uint64_t>(ms) * 1'000'000ULL;
+        }
         if (auto const v = env.get("MXL_TIMESTAMP_SOURCE"))
         {
             if (*v == "hardware")
@@ -783,6 +816,74 @@ namespace mxldl::config
         {
             cfg.nmosRegistryPort = parseInt("NMOS_REGISTRY_PORT", *v, 1, 65535);
         }
+        if (auto const v = env.get("NMOS_SEED"))
+        {
+            cfg.nmosSeed = *v;
+        }
+        if (auto const v = env.get("NMOS_TAGS"))
+        {
+            picojson::value root;
+            std::string const text = *v;
+            auto cursor = text.begin();
+            auto const err = picojson::parse(root, cursor, text.end());
+            if (!err.empty() || !root.is<picojson::object>())
+            {
+                fail("NMOS_TAGS: expected a JSON object of tag name to array of strings");
+            }
+            for (auto const& [name, value] : root.get<picojson::object>())
+            {
+                if (!value.is<picojson::array>())
+                {
+                    fail("NMOS_TAGS: tag '" + name + "' must be an array of strings");
+                }
+                std::vector<std::string> values;
+                for (auto const& item : value.get<picojson::array>())
+                {
+                    if (!item.is<std::string>())
+                    {
+                        fail("NMOS_TAGS: tag '" + name + "' must be an array of strings");
+                    }
+                    values.push_back(item.get<std::string>());
+                }
+                cfg.nmosTags.emplace(name, std::move(values));
+            }
+        }
+        if (auto const v = env.get("NMOS_QUERY_ADDRESS"))
+        {
+            cfg.nmosQueryAddress = *v;
+        }
+        if (auto const v = env.get("NMOS_QUERY_PORT"))
+        {
+            cfg.nmosQueryPort = parseInt("NMOS_QUERY_PORT", *v, 1, 65535);
+        }
+        if (auto const v = env.get("NMOS_DNS_SD"))
+        {
+            cfg.nmosDnsSd = parseBool("NMOS_DNS_SD", *v);
+        }
+        if (auto const v = env.get("NMOS_HOST_ADDRESS"))
+        {
+            if (!util::isIpLiteral(*v) || *v == "0.0.0.0" || v->rfind("127.", 0) == 0 || *v == "::1")
+            {
+                fail("NMOS_HOST_ADDRESS: must be a non-loopback IP address literal, not a hostname");
+            }
+            cfg.nmosHostAddress = *v;
+        }
+        if (cfg.nmosQueryAddress.empty())
+        {
+            cfg.nmosQueryAddress = cfg.nmosRegistryAddress;
+        }
+        if (cfg.nmosQueryPort < 0)
+        {
+            cfg.nmosQueryPort = cfg.nmosRegistryPort + 1;
+        }
+        if (auto const v = env.get("CONFIG_DIR"))
+        {
+            cfg.configDir = *v;
+        }
+        if (auto const v = env.get("MXL_CLEANUP_ON_EXIT"))
+        {
+            cfg.cleanupOnExit = parseBool("MXL_CLEANUP_ON_EXIT", *v);
+        }
         if (cfg.nmosEnable && (cfg.nmosPort == cfg.webPort || cfg.nmosPort + 1 == cfg.webPort))
         {
             fail("NMOS_PORT (" + std::to_string(cfg.nmosPort) + " and " + std::to_string(cfg.nmosPort + 1) +
@@ -796,6 +897,10 @@ namespace mxldl::config
         if (auto const v = env.get("MXL_CONFIG_FILE"))
         {
             cfg.configFile = *v;
+        }
+        else
+        {
+            cfg.configFile = cfg.configDir + "/mxl-decklink.json";
         }
         if (auto const v = env.get("MXL_DOMAIN_SCAN_PATH"))
         {

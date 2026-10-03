@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 
 #include "channel/channel_manager.hpp"
 #include "config/config.hpp"
@@ -24,6 +25,10 @@ namespace mxldl::ops
         /// within the last 5 seconds (§7.1).
         void heartbeat();
 
+        /// When set, /readyz is 503 until the function returns true.
+        /// Used for "registered with the NMOS registry".
+        void setReadyGate(std::function<bool()> gate);
+
         HttpResponse livez();
         HttpResponse readyz();
         HttpResponse statusz();
@@ -34,5 +39,6 @@ namespace mxldl::ops
         channel::ChannelManager& _channels;
         Registry& _metrics;
         std::atomic<std::uint64_t> _lastHeartbeatTai{0};
+        std::function<bool()> _readyGate;
     };
 }

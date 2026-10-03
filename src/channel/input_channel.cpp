@@ -56,16 +56,16 @@ namespace mxldl::channel
         _signalLostTotal = &metrics.counter("mxl_decklink_signal_lost_total", "Signal loss events", labels);
         _formatChangesTotal = &metrics.counter("mxl_decklink_format_changes_total", "Input format changes", labels);
         _reconnectTotal = &metrics.counter("mxl_decklink_reconnect_total", "Channel reconnect attempts", labels);
-        _grainsCommitted = &metrics.counter("mxl_grains_committed_total", "MXL grains committed", labels);
-        _grainsWrittenBytes = &metrics.counter("mxl_grains_written_bytes_total", "Bytes written into MXL grains", labels);
+        _grainsCommitted = &metrics.counter("mxl_decklink_grains_committed_total", "MXL grains committed", labels);
+        _grainsWrittenBytes = &metrics.counter("mxl_decklink_grains_written_bytes_total", "Bytes written into MXL grains", labels);
         _stateGauge = &metrics.gauge("mxl_decklink_channel_state", "Channel state (0=init 1=healthy 2=degraded 3=failed)", labels);
         _signalLockGauge = &metrics.gauge("mxl_decklink_signal_lock", "Input signal lock (0/1)", labels);
-        _headIndexGauge = &metrics.gauge("mxl_ringbuffer_headindex", "Last committed grain index", labels);
-        _flowWriterActive = &metrics.gauge("mxl_flow_writer_active", "Flow writer active (0/1)", labels);
-        _commitLatency = &metrics.histogram("mxl_flow_grain_commit_latency_seconds", "Grain open→commit latency", ops::Registry::latencyBuckets(),
+        _headIndexGauge = &metrics.gauge("mxl_decklink_ringbuffer_head_index", "Last committed grain index", labels);
+        _flowWriterActive = &metrics.gauge("mxl_decklink_flow_writer_active", "Flow writer active (0/1)", labels);
+        _commitLatency = &metrics.histogram("mxl_decklink_grain_commit_latency_seconds", "Grain open→commit latency", ops::Registry::latencyBuckets(),
             labels);
         _callbackDuration =
-            &metrics.histogram("mxl_callback_duration_seconds", "DeckLink callback duration", ops::Registry::latencyBuckets(), labels);
+            &metrics.histogram("mxl_decklink_callback_duration_seconds", "DeckLink callback duration", ops::Registry::latencyBuckets(), labels);
     }
 
     InputChannel::~InputChannel()

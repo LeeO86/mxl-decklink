@@ -10,6 +10,7 @@ metadata:
     app.kubernetes.io/instance: quad2-a
 spec:
   replicas: 1 # hardware-bound; never scale horizontally (§6.5)
+  # Longer than SHUTDOWN_TIMEOUT_S (10) so SIGTERM can deregister and exit 143.
   strategy:
     type: Recreate # the card is exclusive; no rolling overlap possible
   selector:
@@ -22,13 +23,14 @@ spec:
         app.kubernetes.io/name: mxl-decklink
         app.kubernetes.io/instance: quad2-a
     spec:
+      terminationGracePeriodSeconds: 30
       nodeSelector:
         hardware/decklink: "true"
         # Alternative via Node Feature Discovery on the Blackmagic PCI vendor:
         # feature.node.kubernetes.io/pci-1edb.present: "true"
       containers:
         - name: mxl-decklink
-          image: ghcr.io/leeo86/mxl-decklink:1.1.0
+          image: ghcr.io/leeo86/mxl-decklink:1.0.0
           resources:
             # §6.4: Guaranteed QoS — requests == limits, integer CPUs.
             # Sizing per §6.3 (Quad 2, 8× HD half duplex).
@@ -46,7 +48,7 @@ spec:
             runAsGroup: 1000
             # DeckLink nodes are typically root:video 0660; 44 is video on
             # Debian/Ubuntu — override for other distros.
-            supplementalGroups: [44]
+            supplementalGroups: [1000, 44] # 1000 owns the MXL tmpfs; 44 is video for DeckLink nodes
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
@@ -56,8 +58,14 @@ spec:
               value: "0xa1b2c3d4"
             - name: MXL_DECKLINK_CARD_PROFILE
               value: four-half-duplex
-            - name: MXL_DOMAIN_PATH
-              value: /Volumes/mxl/mxl
+            - name: MXL_OUTPUT_DOMAIN_DIR
+              value: /Volumes/mxl/mxl-decklink-quad2-a
+            - name: MXL_CLEANUP_ON_EXIT
+              value: "true"
+            - name: CONFIG_DIR
+              value: /config
+            - name: SHUTDOWN_TIMEOUT_S
+              value: "10"
             - name: MXL_DOMAIN_SCAN_PATH
               value: /Volumes/mxl
             - name: MXL_TIMESTAMP_SOURCE
@@ -110,8 +118,20 @@ spec:
               value: "true"
             - name: NMOS_PORT
               value: "3212"
-            # - name: NMOS_REGISTRY_ADDRESS
-            #   value: nmos-registry.example
+            - name: NMOS_DNS_SD
+              value: "false"
+            - name: NMOS_SEED
+              value: sport-sa-decklink
+            - name: NMOS_LABEL
+              value: decklink
+            - name: NMOS_TAGS
+              value: '{"urn:x-srf:production":["sport-sa"],"urn:x-srf:function":["decklink"]}'
+            - name: NMOS_REGISTRY_ADDRESS
+              value: nmos-registry.mxl.svc
+            - name: NMOS_REGISTRY_PORT
+              value: "3210"
+            - name: NMOS_QUERY_PORT
+              value: "3211"
           ports:
             # Consolidated HTTP port (§7.1): web UI + REST API + health + metrics.
             # Unauthenticated — expose only via an authenticating ingress, or
@@ -142,6 +162,8 @@ spec:
           volumeMounts:
             - name: mxl
               mountPath: /Volumes/mxl
+            - name: config
+              mountPath: /config
             # Optional (§5.2):
             # - name: bm-preferences
             #   mountPath: /etc/blackmagic/BlackmagicPreferences.xml
@@ -154,6 +176,8 @@ spec:
           hostPath:
             path: /Volumes/mxl
             type: Directory
+        - name: config
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service

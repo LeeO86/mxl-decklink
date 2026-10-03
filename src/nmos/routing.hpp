@@ -47,8 +47,14 @@ namespace mxldl::nmosroute
     };
 
     /// Stable UUID derived from the card persistent id and a role name
-    /// ("node", "device", "sender/ch0/video", ...).
+    /// ("node", "device", "sender/ch0/video", ...). Used when NMOS_SEED is unset.
     [[nodiscard]] std::string stableId(std::uint32_t cardPersistentId, std::string const& name);
+
+    /// UUIDv5 of `mxl-decklink/<seed>/<name>` under the DNS namespace.
+    [[nodiscard]] std::string idFromSeed(std::string const& seed, std::string const& name);
+
+    /// Node id: NMOS_SEED when set, otherwise the card persistent id.
+    [[nodiscard]] std::string nodeIdFor(config::Config const& cfg, std::uint32_t cardPersistentId);
 
     /// Stable node UUID derived from the card persistent id.
     [[nodiscard]] std::string nodeIdForCard(std::uint32_t cardPersistentId);

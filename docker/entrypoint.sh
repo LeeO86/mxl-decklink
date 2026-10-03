@@ -4,7 +4,7 @@
 # exits 78/EX_CONFIG on any violation).
 set -u
 
-DOMAIN_PATH="${MXL_DOMAIN_PATH:-/dev/shm/mxl}"
+DOMAIN_PATH="${MXL_OUTPUT_DOMAIN_DIR:-${MXL_DOMAIN_PATH:-/Volumes/mxl/mxl-decklink}}"
 BACKEND="${MXL_DECKLINK_BACKEND:-sdk}"
 
 if [[ "$BACKEND" != "mock" ]]; then
@@ -17,8 +17,9 @@ if [[ "$BACKEND" != "mock" ]]; then
     fi
 fi
 
-if [[ ! -d "$DOMAIN_PATH" ]]; then
-    echo "{\"level\":\"error\",\"event\":\"entrypoint_check_failed\",\"details\":\"MXL domain path $DOMAIN_PATH does not exist; mount a tmpfs there\"}" >&2
+DOMAIN_PARENT="$(dirname "$DOMAIN_PATH")"
+if [[ ! -d "$DOMAIN_PARENT" ]]; then
+    echo "{\"level\":\"error\",\"event\":\"entrypoint_check_failed\",\"details\":\"parent of MXL output domain $DOMAIN_PARENT does not exist; mount the MXL root there\"}" >&2
     exit 78
 fi
 

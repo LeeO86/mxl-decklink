@@ -56,7 +56,7 @@ TEST_CASE("minimal multi-channel config parses with defaults")
     CHECK(ch.label == "ch0");
     CHECK(ch.groupHint == "ch0");
     CHECK(cfg.cardId == 0xa1b2c3d4);
-    CHECK(cfg.domainPath == "/dev/shm/mxl");
+    CHECK(cfg.domainPath == "/Volumes/mxl/mxl-decklink");
     CHECK(cfg.timestampSource == config::TimestampSourceCfg::Hardware);
     CHECK(cfg.webPort == 8080);
     CHECK(cfg.webEnable);
@@ -108,7 +108,7 @@ TEST_CASE("completely empty env still loads with defaults")
     CHECK(cfg.minHealthyChannels == 0);
     REQUIRE(cfg.cardIndex.has_value());
     CHECK(*cfg.cardIndex == 0);
-    CHECK(cfg.domainPath == "/dev/shm/mxl");
+    CHECK(cfg.domainPath == "/Volumes/mxl/mxl-decklink");
     CHECK(cfg.webEnable);
 }
 
@@ -326,6 +326,40 @@ TEST_CASE("cpu pin list parsing")
     CHECK(*cfg.cpuPinList == std::vector<int>{0, 2, 4, 5, 6});
 
     vars["MXL_CPU_PIN_LIST"] = "0,,2";
+    CHECK_THROWS_AS(config::loadConfig(envOf(vars)), config::ConfigError);
+}
+
+TEST_CASE("platform setting aliases and NMOS defaults")
+{
+    auto vars = minimalMultiChannel();
+    vars["MXL_DOMAIN_PATH"] = "/tmp/alias-domain";
+    auto const aliased = config::loadConfig(envOf(vars));
+    CHECK(aliased.domainPath == "/tmp/alias-domain");
+
+    vars["MXL_OUTPUT_DOMAIN_DIR"] = "/tmp/standard-domain";
+    auto const standard = config::loadConfig(envOf(vars));
+    CHECK(standard.domainPath == "/tmp/standard-domain");
+
+    auto const defaults = config::loadConfig(envOf(minimalMultiChannel()));
+    CHECK_FALSE(defaults.nmosDnsSd);
+    CHECK(defaults.nmosQueryPort == defaults.nmosRegistryPort + 1);
+    CHECK(defaults.configDir == "/config");
+    CHECK(defaults.domainScanPath == "/Volumes/mxl");
+    CHECK_FALSE(defaults.cleanupOnExit);
+
+    vars = minimalMultiChannel();
+    vars["NMOS_TAGS"] = R"({"urn:x-srf:production":["sport-sa"],"urn:x-srf:function":["decklink"]})";
+    vars["NMOS_SEED"] = "sport-sa-decklink";
+    vars["NMOS_HOST_ADDRESS"] = "10.1.2.3";
+    vars["NMOS_DNS_SD"] = "false";
+    auto const tagged = config::loadConfig(envOf(vars));
+    CHECK(tagged.nmosSeed == "sport-sa-decklink");
+    CHECK(tagged.nmosHostAddress == "10.1.2.3");
+    CHECK(tagged.nmosTags.at("urn:x-srf:production") == std::vector<std::string>{"sport-sa"});
+
+    vars["NMOS_HOST_ADDRESS"] = "decklink.example";
+    CHECK_THROWS_AS(config::loadConfig(envOf(vars)), config::ConfigError);
+    vars["NMOS_HOST_ADDRESS"] = "127.0.0.1";
     CHECK_THROWS_AS(config::loadConfig(envOf(vars)), config::ConfigError);
 }
 

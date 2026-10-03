@@ -123,11 +123,31 @@ pod otherwise has no multicast path to the LAN. `deploy/mxl-decklink.yaml`
 does not set `hostNetwork`; add `NMOS_REGISTRY_ADDRESS` there for unicast
 registration.
 
-Senders write the domain in `MXL_DOMAIN_PATH` (its `domain_def.json` `id` is
-`mxl_domain_id`). Receivers may read any domain discovered under
-`MXL_DOMAIN_SCAN_PATH`. `master_enable` starts and stops that leg's MXL
-writer or reader. A format change on an input mints a new flow UUID and
-updates the sender's IS-04 Flow and active `mxl_flow_id`.
+Senders write `MXL_OUTPUT_DOMAIN_DIR` (`MXL_DOMAIN_PATH` is the same setting).
+Its `domain_def.json` `id` is `mxl_domain_id`. Receivers may read any domain
+discovered under `MXL_DOMAIN_SCAN_PATH`. `master_enable` starts and stops that
+leg's MXL writer or reader and is stored in the config file when the
+environment does not already pin `CHx_MXL_ACTIVE` / `CHx_AFn_MXL_ACTIVE`.
+
+### Exit codes
+
+| Code | When |
+|---|---|
+| 0 | The process is still running. SIGTERM does not use 0. |
+| 2 | The card profile changed outside this process. |
+| 75 | Temporary failure: card retries exhausted, or a TCP port cannot be bound. |
+| 78 | Invalid configuration, including a `domain_def.json` id that does not match `MXL_OUTPUT_DOMAIN_ID`. |
+| 143 | SIGTERM or SIGINT finished (or the shutdown watchdog fired). |
+
+### HTTP API
+
+Always: `GET /livez`, `GET /readyz`, `GET /statusz`, `GET /metrics`, `GET /api/v1/config/export`, `POST /api/v1/config/import`.
+
+With `WEB_ENABLE=true`: `GET /`, `GET /api/status`, `GET /api/card`, `GET /api/config`, `PUT /api/config`, `GET /api/domains`, `POST /api/domains`, `GET /api/flows`.
+
+The export document is `{"settings":{...}}` of the config file. It contains no secrets (this function stores none). Import replaces that file. Environment variables still win on the next start.
+
+Settings are listed in `SPECIFICATION.md` §4. On the platform, set `NMOS_SEED`, `NMOS_TAGS`, `NMOS_REGISTRY_ADDRESS`, `NMOS_DNS_SD=false`, `MXL_OUTPUT_DOMAIN_DIR`, `MXL_DOMAIN_SCAN_PATH=/Volumes/mxl`, and `MXL_CLEANUP_ON_EXIT=true`. Leave `NMOS_HOST_ADDRESS` unset so the pod IP is announced.
 
 
 The Blackmagic **DeckLink interface headers** are vendored under
@@ -208,8 +228,9 @@ CH0_AF0_MAP=0,1 \
 ### First deploy (empty config)
 
 No card selector and no `CHx_*` variables are required to bring the process up.
-Defaults: `MXL_DECKLINK_CARD_INDEX=0`, `MXL_DOMAIN_PATH=/dev/shm/mxl` (created if
-missing), zero channels, readiness threshold clamped to 0. Mount a config volume
+Defaults: `MXL_DECKLINK_CARD_INDEX=0`, `MXL_OUTPUT_DOMAIN_DIR=/Volumes/mxl/mxl-decklink`
+(created if missing; `MXL_DOMAIN_PATH` is an alias), zero channels, readiness
+threshold clamped to 0. Mount a config volume
 and open the web UI to add channels:
 
 ```bash

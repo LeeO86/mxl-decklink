@@ -18,7 +18,18 @@ namespace mxldl::config
         /// v1.1 schema exclusively.
         bool isEnvOnlyKey(std::string const& key)
         {
-            return key == "MXL_CONFIG_FILE";
+            return key == "MXL_CONFIG_FILE" || key == "CONFIG_DIR";
+        }
+
+        std::optional<std::string> resolveConfigFile(EnvReader const& env)
+        {
+            if (auto const p = env("MXL_CONFIG_FILE"); p && !p->empty())
+            {
+                return *p;
+            }
+            auto const dir = env("CONFIG_DIR");
+            std::string const root = dir && !dir->empty() ? *dir : "/config";
+            return root + "/mxl-decklink.json";
         }
     }
 
@@ -36,11 +47,8 @@ namespace mxldl::config
     ConfigStore::ConfigStore(EnvReader env)
         : _env(std::move(env))
     {
-        if (auto const p = _env("MXL_CONFIG_FILE"); p && !p->empty())
-        {
-            _filePath = *p;
-            loadFile();
-        }
+        _filePath = resolveConfigFile(_env);
+        loadFile();
     }
 
     void ConfigStore::loadFile()
@@ -337,5 +345,79 @@ namespace mxldl::config
             }
         }
         return out;
+    }
+
+    std::string ConfigStore::exportDocument() const
+    {
+        std::lock_guard const lock{_mutex};
+        std::string json = "{\"settings\":{";
+        bool first = true;
+        for (auto const& [key, value] : _fileLayer)
+        {
+            if (!first)
+            {
+                json += ',';
+            }
+            first = false;
+            json += "\"" + log::jsonEscape(key) + "\":\"" + log::jsonEscape(value) + "\"";
+        }
+        json += "}}";
+        return json;
+    }
+
+    std::variant<ConfigStore::UpdateResult, std::string> ConfigStore::importDocument(std::string const& document)
+    {
+        picojson::value root;
+        auto const err = picojson::parse(root, document);
+        if (!err.empty() || !root.is<picojson::object>())
+        {
+            return std::string("body must be a JSON object with a settings object");
+        }
+        auto const& obj = root.get<picojson::object>();
+        auto const it = obj.find("settings");
+        if (it == obj.end() || !it->second.is<picojson::object>())
+        {
+            return std::string("body must contain a settings object");
+        }
+        std::map<std::string, std::optional<std::string>> changes;
+        {
+            std::lock_guard const lock{_mutex};
+            for (auto const& [key, value] : _fileLayer)
+            {
+                if (auto const envVal = _env(key); envVal && !envVal->empty())
+                {
+                    continue;
+                }
+                changes[key] = std::nullopt;
+            }
+        }
+        for (auto const& [key, value] : it->second.get<picojson::object>())
+        {
+            if (value.is<std::string>())
+            {
+                changes[key] = value.get<std::string>();
+            }
+            else if (value.is<bool>())
+            {
+                changes[key] = value.get<bool>() ? "true" : "false";
+            }
+            else if (value.is<double>())
+            {
+                auto const n = value.get<double>();
+                if (n == static_cast<double>(static_cast<long long>(n)))
+                {
+                    changes[key] = std::to_string(static_cast<long long>(n));
+                }
+                else
+                {
+                    return "settings." + key + " must be a string";
+                }
+            }
+            else
+            {
+                return "settings." + key + " must be a string";
+            }
+        }
+        return update(changes);
     }
 }

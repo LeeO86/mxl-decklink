@@ -193,7 +193,7 @@ Multi-channel operation uses **indexed prefixes `CHx_…`** (x = 0..15), one pre
 | `MXL_DECKLINK_CARD_NAME` | String | — | no† | Human-readable name from `GetDisplayName`, e.g. `"DeckLink Duo 2"`. |
 | `MXL_DECKLINK_CARD_INDEX` | Integer ≥0 | `0` | no† | Zero-based card index in enumeration order. **Default when no selector is set** (first-deploy friendly; not reboot-stable — prefer `CARD_ID` in production). |
 | `MXL_DECKLINK_CARD_PROFILE` | enum | — | no | Card profile applied at startup (SDI cards only): `one-full-duplex`, `two-half-duplex`, `four-half-duplex`, `one-half-duplex`. Ignored on profile-less cards (IP 100G). |
-| `MXL_DOMAIN_PATH` | Filesystem path | `/dev/shm/mxl` | no | Domain directory; should be tmpfs-backed. Created automatically if missing. Production examples use `/Volumes/mxl/<domain>` (CBC `mxl-hands-on` pattern, §5.2). |
+| `MXL_OUTPUT_DOMAIN_DIR` | Filesystem path | `/Volumes/mxl/mxl-decklink` | no | This function's own output domain. Created when missing. `MXL_DOMAIN_PATH` is an alias. |
 | `MXL_TIMESTAMP_SOURCE` | enum | `hardware` | no | `hardware` (hardware reference clock) or `host` (`CLOCK_TAI`). |
 | `MXL_HUGEPAGE_PATH` | Filesystem path | — | no | Optional HugePages mount used as backing for grain buffers (UHD scale-out; see §6.4). |
 | `MXL_CPU_PIN_LIST` | CPU list | — | no | Comma-separated CPU list for pinning; overrides Kubernetes CPU-manager assignment. Use outside Kubernetes only. |
@@ -205,12 +205,27 @@ Multi-channel operation uses **indexed prefixes `CHx_…`** (x = 0..15), one pre
 | `MXL_HEALTH_MIN_HEALTHY_CHANNELS` | Integer | `1` | no | Readiness threshold; see §7.2. Auto-clamped to `0` when no channels are configured yet. Set to the total configured channel count for strict "all channels up" semantics. |
 | `SIGNAL_LOSS_TIMEOUT_S` | Integer | `30` | no | Input channels: window without signal after which a stream reset cycle is triggered. |
 | `STARTUP_MAX_RETRIES` | Integer | `10` | no | Retry counter for card-level startup. |
-| `SHUTDOWN_TIMEOUT_S` | Integer | `10` | no | Grace period on SIGTERM. |
+| `SHUTDOWN_TIMEOUT_S` | Integer | `10` | no | Grace period on SIGTERM. A completed SIGTERM exits 143. |
 | `LOG_LEVEL` | enum | `info` | no | `trace`/`debug`/`info`/`warn`/`error`. |
 | `LOG_FORMAT` | enum | `json` | no | `json` (structured) or `text`. |
 | `DECKLINK_LIB_MODE` | enum | `bundled` | no | `bundled` (libDeckLinkAPI.so from image) or `hostmount` (bind-mounted from host); documentation of the chosen pattern, see §5.1. |
-| `MXL_CONFIG_FILE` | Filesystem path | — | no | Path of the JSON configuration file (§4.5). When set, the file supplies the file layer of the configuration; the web interface persists changes to it. Mounted as a config volume in container deployments. |
-| `MXL_DOMAIN_SCAN_PATH` | Filesystem path | `/dev/shm` | no | Root directory scanned for MXL domains (§7.6). Prefer a dedicated tmpfs (e.g. `/Volumes/mxl`) over mounting the host's whole `/dev/shm` (§5.2). |
+| `CONFIG_DIR` | Filesystem path | `/config` | no | Directory for state this process writes. Default file is `$CONFIG_DIR/mxl-decklink.json`. |
+| `MXL_CONFIG_FILE` | Filesystem path | `$CONFIG_DIR/mxl-decklink.json` | no | JSON configuration file (§4.5). Overrides the `CONFIG_DIR` default. Env-only. |
+| `MXL_DOMAIN_SCAN_PATH` | Filesystem path | `/Volumes/mxl` | no | Parent of domain directories (§7.6), including `mirror-*` siblings. |
+| `MXL_OUTPUT_DOMAIN_ID` | UUID | seed or path-stable | no | Id written into `domain_def.json` when the file is created. An existing file with a different id is not overwritten; startup exits 78. |
+| `MXL_HISTORY_DURATION_MS` | Integer | — | no | `history_duration` written to `options.json` only when that file does not exist. |
+| `MXL_CLEANUP_ON_EXIT` | bool | `false` | no | On SIGTERM, remove this function's own output domain directory. |
+| `NMOS_ENABLE` | bool | `false` | no | Serve the BCP-007-03 node. The image is built with nmos-cpp. |
+| `NMOS_PORT` | Port | `3212` | no | NMOS HTTP APIs. WebSocket subscriptions listen on `NMOS_PORT+1`. |
+| `NMOS_LABEL` | String | card name | no | Node label and device-label prefix. |
+| `NMOS_SEED` | String | — | no | UUIDv5 name for node, device, sources, senders, receivers, and the default domain id. |
+| `NMOS_TAGS` | JSON | — | no | Object of tag name to array of strings, added to the node and device. |
+| `NMOS_REGISTRY_ADDRESS` | String | — | no | Unicast Registration API host. |
+| `NMOS_REGISTRY_PORT` | Port | `3210` | no | Registration API port. |
+| `NMOS_QUERY_ADDRESS` | String | registry address | no | Query API host used when checking registration. |
+| `NMOS_QUERY_PORT` | Port | registry port + 1 | no | Query API port. |
+| `NMOS_DNS_SD` | bool | `false` | no | When false, no DNS-SD browse and no mDNS advertisement. |
+| `NMOS_HOST_ADDRESS` | IP literal | first non-loopback IPv4 | no | Address announced in IS-04 and IS-05. Never a hostname. |
 
 † At most one of `CARD_ID` / `CARD_NAME` / `CARD_INDEX` may be set. If none are set, `CARD_INDEX=0` is assumed. Channels (`CHx_DIRECTION`, …) are **optional at startup** — an empty channel list starts the process and web UI so operators can finish configuration interactively (with `MXL_CONFIG_FILE` mounted). If the DeckLink card cannot be opened and no channels are configured, the process falls back to the mock card so the UI stays reachable; set a real card selector and restart before enabling live channels.
 
@@ -279,7 +294,7 @@ The build is **multi-stage**:
 
 **Field note on `bundled` vs `hostmount` (v1.1 deployment experience).** The bundled pattern is fragile in practice: any skew between the library baked into the image and the host kernel driver makes `libDeckLinkAPI.so` fail to communicate with the driver (device enumeration returns nothing or the API refuses to initialize). Unless the image build is strictly pinned to each host's Desktop Video release, **`DECKLINK_LIB_MODE=hostmount` with a read-only bind mount of the host's `libDeckLinkAPI.so` is the recommended default** — it matches the host driver by definition. The host path for that library varies by distro (commonly `/usr/lib/x86_64-linux-gnu/libDeckLinkAPI.so` on Debian/Ubuntu, sometimes `/usr/lib/libDeckLinkAPI.so`); locate it with `find /usr -name 'libDeckLinkAPI.so'` and mount it to `/usr/lib/libDeckLinkAPI.so` in the container. At startup the container logs the loaded DeckLink API version as structured event `decklink_api_version` (via `IDeckLinkAPIInformation`) so mismatches are diagnosable.
 
-The application binary lives at `/usr/local/bin/mxl-decklink`. The container entrypoint validates the ENV, checks for `/dev/blackmagic/` and `${MXL_DOMAIN_PATH}`, and starts the binary. The container runs as a **non-root user** (`uid=10001`, group `video` with a GID aligned to the host), with extra capabilities only when `RT_SCHED=true` demands them. The uid/gid can be overridden at deployment time (see §5.3, MXL domain ownership).
+The application binary lives at `/usr/local/bin/mxl-decklink`. The container entrypoint validates the ENV, checks for `/dev/blackmagic/` and `${MXL_DOMAIN_PATH}`, and starts the binary. The container runs as a **non-root user** (`uid=1000`, `gid=1000`, plus the host `video` group so `/dev/blackmagic` can be opened), with extra capabilities only when `RT_SCHED=true` demands them.
 
 ### 5.2 Required Mounts
 
@@ -292,7 +307,7 @@ The application binary lives at `/usr/local/bin/mxl-decklink`. The container ent
 
 The container runs **non-privileged**. Standard capture/playback needs only the device mount, plus optionally `CAP_SYS_NICE` and `CAP_IPC_LOCK` for RT scheduling and `mlock`. `--ipc=host` is not required — MXL uses no SysV IPC, only `mmap()` on a shared filesystem path. A read-only rootfs is possible with a tmpfs for `/tmp` and `/var/log`. Seccomp default profile; AppArmor/SELinux labels are host-specific.
 
-**MXL domain ownership (field note).** MXL flows are plain files in the shared tmpfs; every cooperating media-function container must be able to read **and write** them (the reader side updates access metadata and takes shared locks). All containers sharing a domain must therefore agree on the file ownership — in practice: run every MXL container with the **same uid/gid (or a common group) as the owner of the domain directory**. The stock image user is `uid=10001`; when the domain is owned by another uid (commonly `1000`, the first user on most distributions and the default in the `mxl-hands-on` examples), override the container user at deployment time (Docker `user: "1000:1000"`, Kubernetes `securityContext.runAsUser/runAsGroup/fsGroup`). The compose example documents this.
+**MXL domain ownership (field note).** MXL flows are plain files in the shared tmpfs; every cooperating media-function container must be able to read **and write** them (the reader side updates access metadata and takes shared locks). All containers sharing a domain must therefore agree on the file ownership — in practice: run every MXL container with the **same uid/gid (or a common group) as the owner of the domain directory**. The stock image user is `uid=1000`/`gid=1000`, which matches the platform and the `mxl-hands-on` domain owner. The `video` group is added only for DeckLink device nodes.
 
 ### 5.4 Host Prerequisites
 

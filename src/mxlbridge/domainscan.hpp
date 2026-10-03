@@ -76,8 +76,24 @@ namespace mxldl::mxlbridge
     /// the path escapes `scanRoot` or a domain already exists there.
     std::variant<CreateDomainResult, std::string> createDomain(CreateDomainRequest const& request, std::string const& scanRoot);
 
+    struct OutputDomainSpec
+    {
+        std::string path;
+        /// When set, an existing domain_def.json with a different id is an error
+        /// and is not overwritten. When unset, an existing id is kept.
+        std::optional<std::string> id;
+        /// Written to options.json only when that file does not exist.
+        std::optional<std::uint64_t> historyDurationNs;
+    };
+
+    /// Creates the output domain when needed. Never rewrites an existing
+    /// domain_def.json. Throws std::runtime_error. A message starting with
+    /// "domain_id_mismatch:" means the configured id does not match the file.
+    [[nodiscard]] std::string adoptOutputDomain(OutputDomainSpec const& spec);
+
     /// Reads `domain_def.json` in `domainPath`. When the file is missing, writes
-    /// one with a path-stable UUID (BCP-007-03 domain identity). Returns the id.
+    /// one with a path-stable UUID (BCP-007-03 domain identity). Does not rewrite
+    /// an existing file. Returns the id.
     std::string ensureDomainId(std::string const& domainPath);
 
     /// True when `path` resolves (via weakly_canonical) to `root` or a

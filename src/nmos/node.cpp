@@ -2,14 +2,19 @@
 #include "nmos/node.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
+#include <functional>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <queue>
 #include <stdexcept>
 #include <thread>
 #include <utility>
+
+#include "nmos/resources.h"
 
 #include "cpprest/host_utils.h"
 
@@ -91,6 +96,28 @@ namespace mxldl::nmosnode
             fallback.rateNumerator = 50;
             fallback.rateDenominator = 1;
             return fallback;
+        }
+
+        void addPlatformTags(nmos::resource& resource, std::map<std::string, std::vector<std::string>> const& tags)
+        {
+            if (tags.empty())
+            {
+                return;
+            }
+            if (!resource.data.has_field(nmos::fields::tags) || !resource.data.at(nmos::fields::tags).is_object())
+            {
+                resource.data[nmos::fields::tags] = web::json::value::object();
+            }
+            auto& obj = resource.data[nmos::fields::tags];
+            for (auto const& [name, values] : tags)
+            {
+                web::json::value arr = web::json::value::array();
+                for (auto const& value : values)
+                {
+                    web::json::push_back(arr, web::json::value::string(us(value)));
+                }
+                obj[us(name)] = std::move(arr);
+            }
         }
 
         void tagGroup(nmos::resource& resource, std::string const& group, std::string const& role)
@@ -179,6 +206,8 @@ namespace mxldl::nmosnode
         std::mutex modelMu;
         nmos::node_model* model = nullptr;
         std::atomic<bool> accept{true};
+        std::atomic<bool> isRegistered{false};
+        std::function<void()> persist;
 
         std::mutex readyMu;
         std::condition_variable readyCv;
@@ -286,7 +315,9 @@ namespace mxldl::nmosnode
             auto const interfaces = nmos::experimental::node_interfaces(hostInterfaces);
 
             auto node = nmos::make_node(us(nodeId), clocks, nmos::make_node_interfaces(interfaces), model.settings);
-            setLabel(node, cfg.nmosLabel.empty() ? cardName : cfg.nmosLabel, "mxl-decklink BCP-007-03 node");
+            auto const nodeLabel = cfg.nmosLabel.empty() ? cardName : cfg.nmosLabel;
+            setLabel(node, nodeLabel, "mxl-decklink BCP-007-03 node");
+            addPlatformTags(node, cfg.nmosTags);
             insert(model, model.node_resources, std::move(node));
 
             std::vector<nmos::id> senderIds;
@@ -296,7 +327,10 @@ namespace mxldl::nmosnode
                 (leg.sender ? senderIds : receiverIds).push_back(us(leg.id));
             }
             auto device = nmos::make_device(us(deviceId), us(nodeId), senderIds, receiverIds, model.settings);
-            setLabel(device, cardName.empty() ? "DeckLink" : cardName, "DeckLink card bridged to MXL");
+            auto const deviceLabel = cfg.nmosLabel.empty() ? (cardName.empty() ? std::string("DeckLink") : cardName)
+                                                           : cfg.nmosLabel + " " + (cardName.empty() ? std::string("DeckLink") : cardName);
+            setLabel(device, deviceLabel, "DeckLink card bridged to MXL");
+            addPlatformTags(device, cfg.nmosTags);
             insert(model, model.node_resources, std::move(device));
 
             for (auto const& leg : legs)
@@ -613,6 +647,17 @@ namespace mxldl::nmosnode
                             {"domain_id", job.activation.domainId},
                             {"flow_id", job.activation.flowId.value_or("")},
                         });
+                    if (persist)
+                    {
+                        try
+                        {
+                            persist();
+                        }
+                        catch (std::exception const& ex)
+                        {
+                            log::warn("nmos_activation_persist_failed", {{"details", ex.what()}});
+                        }
+                    }
                 }
             }
         }
@@ -659,8 +704,8 @@ namespace mxldl::nmosnode
             try
             {
                 nmos::node_model nodeModel;
-                nodeId = nmosroute::nodeIdForCard(cardId);
-                deviceId = nmosroute::stableId(cardId, "device");
+                nodeId = nmosroute::nodeIdFor(cfg, cardId);
+                deviceId = cfg.nmosSeed.empty() ? nmosroute::stableId(cardId, "device") : nmosroute::idFromSeed(cfg.nmosSeed, "device");
                 web::json::value settings = web::json::value::object();
                 settings[U("http_port")] = cfg.nmosPort;
                 settings[U("label")] = web::json::value::string(us(cfg.nmosLabel.empty() ? cardName : cfg.nmosLabel));
@@ -669,6 +714,22 @@ namespace mxldl::nmosnode
                 settings[U("service_name_prefix")] = web::json::value::string(U("mxl-decklink"));
                 settings[U("logging_level")] = 20;
                 settings[U("control_protocol_ws_port")] = -1;
+                // Addresses only: never a hostname, 0.0.0.0, or loopback.
+                settings[U("href_mode")] = 2;
+                if (!cfg.nmosHostAddress.empty())
+                {
+                    settings[U("host_address")] = web::json::value::string(us(cfg.nmosHostAddress));
+                    web::json::value addresses = web::json::value::array();
+                    web::json::push_back(addresses, web::json::value::string(us(cfg.nmosHostAddress)));
+                    settings[U("host_addresses")] = std::move(addresses);
+                }
+                if (!cfg.nmosDnsSd)
+                {
+                    auto const off = (std::numeric_limits<int>::max)();
+                    settings[U("pri")] = off;
+                    settings[U("highest_pri")] = off;
+                    settings[U("authorization_highest_pri")] = off;
+                }
                 if (!cfg.nmosRegistryAddress.empty())
                 {
                     settings[U("registry_address")] = web::json::value::string(us(cfg.nmosRegistryAddress));
@@ -680,7 +741,7 @@ namespace mxldl::nmosnode
                 logModel.level = nmos::fields::logging_level(logModel.settings);
 
                 primaryDomainPath = cfg.domainPath;
-                primaryDomainId = mxlbridge::ensureDomainId(cfg.domainPath);
+                primaryDomainId = cfg.outputDomainId.empty() ? mxlbridge::ensureDomainId(cfg.domainPath) : cfg.outputDomainId;
                 domains.clear();
                 bool sawPrimary = false;
                 for (auto const& found : mxlbridge::scanDomains(cfg.domainScanPath))
@@ -772,6 +833,12 @@ namespace mxldl::nmosnode
                                           .on_set_transportfile([](nmos::resource const&, nmos::resource const&, web::json::value& transportFile) {
                                               transportFile = web::json::value::null();
                                           })
+                                          .on_registration_changed([this](web::uri const& registrationUri) {
+                                              isRegistered.store(!registrationUri.is_empty());
+                                              log::info("nmos_registration",
+                                                  {{"registered", !registrationUri.is_empty()},
+                                                      {"registry", registrationUri.is_empty() ? "" : su(registrationUri.to_string())}});
+                                          })
                                           .on_connection_activated([this](nmos::resource const&, nmos::resource const& connection) {
                                               if (!accept.load())
                                               {
@@ -856,6 +923,16 @@ namespace mxldl::nmosnode
         stop();
     }
 
+    void Node::setPersist(std::function<void()> persist)
+    {
+        _impl->persist = std::move(persist);
+    }
+
+    bool Node::registered() const
+    {
+        return _impl && _impl->isRegistered.load();
+    }
+
     void Node::start()
     {
         _impl->channels.setRuntimeFlowsHandler([impl = _impl.get()](int index, channel::InputChannel::RuntimeFlows const& flows) {
@@ -880,6 +957,19 @@ namespace mxldl::nmosnode
         if (!_impl)
         {
             return;
+        }
+        if (_impl->model != nullptr)
+        {
+            {
+                auto lock = _impl->model->write_lock();
+                nmos::erase_resource(_impl->model->node_resources, us(_impl->nodeId), false);
+                _impl->model->notify();
+            }
+            auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+            while (_impl->isRegistered.load() && std::chrono::steady_clock::now() < deadline)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
         }
         _impl->accept.store(false);
         _impl->jobStop.store(true);

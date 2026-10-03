@@ -65,6 +65,12 @@ namespace mxldl::config
         /// (§7.5.1 Settings tab).
         [[nodiscard]] std::string renderEnvBlock() const;
 
+        /// `{"settings":{...}}` of the persisted file layer. No secrets are stored.
+        [[nodiscard]] std::string exportDocument() const;
+
+        /// Replaces the file layer with `document`'s `settings` object.
+        std::variant<UpdateResult, std::string> importDocument(std::string const& document);
+
     private:
         void loadFile();
         [[nodiscard]] EnvReader mergedReader(std::map<std::string, std::string> const& fileLayer) const;
