@@ -99,15 +99,18 @@ COPY --from=build /src/build/mxl-decklink /usr/local/bin/mxl-decklink
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN ldconfig && chmod +x /usr/local/bin/entrypoint.sh
 
-# Non-root (platform uid/gid 1000). The video group is only so the process
-# can open /dev/blackmagic (root:video). No root, no host IPC.
+# Non-root (platform uid/gid 1000). Ubuntu 24.04 already has uid/gid 1000
+# (user ubuntu). The video group is only so the process can open
+# /dev/blackmagic (root:video). No root, no host IPC.
 ARG MXL_REVISION=unknown
 LABEL org.opencontainers.image.source="https://github.com/LeeO86/mxl-decklink" \
       org.opencontainers.image.licenses="MIT" \
       io.dmf.mxl.revision="${MXL_REVISION}"
-RUN groupadd --gid 1000 mxl \
-    && useradd --uid 1000 --gid 1000 --no-create-home --shell /usr/sbin/nologin mxl \
-    && usermod -aG video mxl
+RUN if ! getent group 1000 >/dev/null; then groupadd --gid 1000 mxl; fi \
+    && if ! getent passwd 1000 >/dev/null; then \
+         useradd --uid 1000 --gid 1000 --no-create-home --shell /usr/sbin/nologin mxl; \
+       fi \
+    && usermod -aG video "$(getent passwd 1000 | cut -d: -f1)"
 USER 1000:1000
 
 EXPOSE 8080 3212 3213

@@ -38,8 +38,8 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          # Releases (v* tags) → 1.2.3 / 1.2 / 1 plus `latest`;
-          # everything else (pushes to main, manual runs) → `nightly-dev`.
+          # Releases (v* tags) → X.Y.Z / X.Y / X. Pushes to main also get
+          # nightly-dev and git-<sha7>. `latest` is not published (it would move).
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
