@@ -192,7 +192,7 @@ The abstraction is intentionally thin (value types + 3 interfaces) so the hot pa
    mock channel on one domain, assert via a small `mxl-verify` helper that (a) video
    grains advance at the configured rate with plausible indices, (b) audio samples are
    readable and non-silent, (c) `/readyz` flips to 200, (d) `/metrics` exposes
-   non-zero frame counters, (e) SIGTERM exits 0 within the grace period, and
+   non-zero frame counters, (e) SIGTERM exits 143 within the grace period, and
    (f) signal-loss injection degrades `/readyz` without killing the process.
 3. **Config-failure tests**: invalid env exits 78 with a structured error line; mixed
    v1.0/v1.1 env exits 78.

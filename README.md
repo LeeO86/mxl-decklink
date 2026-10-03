@@ -272,11 +272,11 @@ read-only in the UI).
 
 | Code | Meaning |
 |---|---|
-| 0 | clean shutdown (SIGTERM/SIGINT) |
-| 2 | card profile changed externally (§3.9 fail-fast) |
-| 75 | card-level startup failed after retries (`EX_TEMPFAIL`) |
-| 78 | invalid configuration (`EX_CONFIG`) |
-| 143 | shutdown grace period exceeded, forced exit |
+| 0 | The process is still running. SIGTERM does not use 0. |
+| 2 | The card profile changed outside this process. |
+| 75 | Temporary failure: card retries exhausted, or a TCP port cannot be bound. |
+| 78 | Invalid configuration, including a `domain_def.json` id that does not match `MXL_OUTPUT_DOMAIN_ID`. |
+| 143 | SIGTERM or SIGINT finished (or the shutdown watchdog fired). |
 
 ## Testing without hardware
 
