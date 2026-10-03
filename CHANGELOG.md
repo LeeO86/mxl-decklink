@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- SPECIFICATION §3.10 and the Running section of the README now describe a completed SIGTERM as exit 143, matching the process. `v1.0.0` already behaved that way.
+
 ## 1.0.0
 
 Stable platform contract for settings, HTTP APIs, and shutdown. A later breaking change needs 2.0.0.
