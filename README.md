@@ -322,7 +322,7 @@ Documented in detail in IMPLEMENTATION_PLAN.md §3:
 
 ### Lab run 2026-10-03: DeckLink IP 100G
 
-Host: Ubuntu 24.04, kernel 6.8, Desktop Video 16.1 (API 16.1, `hostmount`), 2× Xeon Gold 6136, chrony with TAI offset 37 s, image built from this repository (1.0.0 plus the clock fix in the CHANGELOG).
+Host: Ubuntu 24.04, kernel 6.8, Desktop Video 16.1 (API 16.1, `hostmount`), 2× Xeon Gold 6136, chrony with TAI offset 37 s, image built from this repository (1.0.1).
 
 - Enumeration: one card, persistent id `0x84ef8e60`, eight sub-devices `DeckLink IP 100G (1)`…`(8)` with persistent ids `0x84ef8e60`…`0x84ef8e67` and the same group id. Each reports capture, playback and format detection, no profile manager. PCIe Gen3 x8. `MXL_DECKLINK_CARD_ID=0x84ef8e60` selects it.
 - Channels: three 1080p50 inputs (sub-devices 0, 2, 7, format detection, 16 DeckLink audio channels, one stereo flow, ANC) and one 1080p50 output (sub-device 1) fed by mxl-test-player through IS-05 (video and 16-channel audio).

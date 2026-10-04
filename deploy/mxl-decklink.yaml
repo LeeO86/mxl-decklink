@@ -30,7 +30,7 @@ spec:
         # feature.node.kubernetes.io/pci-1edb.present: "true"
       containers:
         - name: mxl-decklink
-          image: ghcr.io/leeo86/mxl-decklink:1.0.0
+          image: ghcr.io/leeo86/mxl-decklink:1.0.1
           resources:
             # §6.4: Guaranteed QoS — requests == limits, integer CPUs.
             # Sizing per §6.3 (Quad 2, 8× HD half duplex).
