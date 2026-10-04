@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Hardware-timestamp recalibration steps to a delta above the 1 ms gate when the next recalibration is again above the gate in the same direction. Before, every such delta was rejected and the timestamps of a card without PTP lock drifted without bound (5 ms per minute on the lab DeckLink IP 100G; 315 s after six weeks). A single jump is still rejected. New log event `hw_clock_recalibration_stepped`.
+
 - SPECIFICATION §3.10 and the Running section of the README now describe a completed SIGTERM as exit 143, matching the process. `v1.0.0` already behaved that way.
 
 ## 1.0.0

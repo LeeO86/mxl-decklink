@@ -54,5 +54,6 @@ namespace mxldl::util
         bool _calibrated = false;
         std::int64_t _offsetNs = 0; // tai = hw + offset
         std::uint64_t _lastCalibrationTai = 0;
+        std::int64_t _rejectedDeltaNs = 0; // last delta above the gate, 0 = none
     };
 }
