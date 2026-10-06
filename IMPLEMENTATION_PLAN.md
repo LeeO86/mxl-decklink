@@ -16,7 +16,7 @@ verification strategy. It was written before the code and kept in sync with it.
 | G6 | Ports from env; WebSocket is `NMOS_PORT+1`; bind failure exits 75 | met | `src/main.cpp` `tcpPortAccepts`, `src/ops/httpserver.cpp` |
 | G7 | `/livez`, `/readyz` includes registration, `/metrics` prefix `mxl_decklink_` | met | `src/ops/health.cpp` |
 | G8 | SIGTERM exits 143, deregisters, optional domain removal | met | `src/main.cpp`, `src/nmos/node.cpp` `Node::stop` |
-| G9 | IS-05 BCP-007-03; active connection persisted when not env-pinned | met | `src/nmos/node.cpp`, `CHx_MXL_ACTIVE` |
+| G9 | IS-05 BCP-007-03; active connection persisted when not env-pinned; receivers accept domains created after the start (no `mxl_domain_id` enum, rescan on activation, 1.0.2) | met | `src/nmos/node.cpp`, `CHx_MXL_ACTIVE` |
 | G10 | `GET/POST /api/v1/config/export` and `import`; no secrets stored | met | `src/ops/webapi.cpp`, `src/config/store.cpp` |
 | G11 | GHCR tags `git-<sha7>`, `nightly-dev`, semver; uid 1000; OCI labels | met | `.github/workflows/container.yaml`, `docker/Dockerfile` |
 | G12 | `deploy/` pod network, probes, grace, hostPath, `/config`, no hostIPC | met | `deploy/mxl-decklink.yaml` |

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "nmos/node.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -197,6 +198,7 @@ namespace mxldl::nmosnode
         std::string deviceId;
         std::string primaryDomainId;
         std::string primaryDomainPath;
+        std::mutex domainsMu; // domains: scanned at start and again for a domain created later
         std::vector<nmosroute::DomainBinding> domains;
         std::vector<nmosroute::Leg> legs;
 
@@ -276,11 +278,47 @@ namespace mxldl::nmosnode
             }
         }
 
+        // MXL domains below the scan path, the own output domain always among them.
+        void refreshDomains()
+        {
+            std::vector<nmosroute::DomainBinding> found;
+            bool sawPrimary = false;
+            for (auto const& d : mxlbridge::scanDomains(cfg.domainScanPath))
+            {
+                if (!d.id)
+                {
+                    continue;
+                }
+                found.push_back(nmosroute::DomainBinding{*d.id, d.path});
+                if (d.path == primaryDomainPath || *d.id == primaryDomainId)
+                {
+                    sawPrimary = true;
+                }
+            }
+            if (!sawPrimary)
+            {
+                found.push_back(nmosroute::DomainBinding{primaryDomainId, primaryDomainPath});
+            }
+            std::lock_guard const lock{domainsMu};
+            domains = std::move(found);
+        }
+
+        std::vector<nmosroute::DomainBinding> knownDomains()
+        {
+            std::lock_guard const lock{domainsMu};
+            return domains;
+        }
+
         std::string resolveReceiverDomain(std::string const& flowId)
         {
-            if (!flowId.empty())
+            // A second pass after a rescan: the flow may live in a domain created after the start.
+            for (int pass = 0; pass < 2 && !flowId.empty(); ++pass)
             {
-                for (auto const& domain : domains)
+                if (pass == 1)
+                {
+                    refreshDomains();
+                }
+                for (auto const& domain : knownDomains())
                 {
                     for (auto const& flow : mxlbridge::listFlows(domain.path))
                     {
@@ -464,18 +502,9 @@ namespace mxldl::nmosnode
                     receiver.data[U("version")] = value::string(nmos::make_version());
                     insert(model, model.node_resources, std::move(receiver));
 
-                    web::json::value domainEnum = web::json::value::array();
-                    for (auto const& domain : domains)
-                    {
-                        web::json::push_back(domainEnum, value::string(us(domain.id)));
-                    }
-                    auto connection = nmos::make_connection_mxl_receiver(us(leg.id), domains.size() == 1 ? us(domains.front().id) : utility::string_t{});
-                    if (domains.size() != 1)
-                    {
-                        web::json::value domainConstraint = web::json::value::object();
-                        domainConstraint[U("enum")] = domainEnum;
-                        connection.data[U("constraints")][0][U("mxl_domain_id")] = std::move(domainConstraint);
-                    }
+                    // No enum of mxl_domain_id: a domain created after the start (a new production's output)
+                    // must pass the PATCH; the activation checks it, after a rescan (refreshDomains).
+                    auto connection = nmos::make_connection_mxl_receiver(us(leg.id), utility::string_t{});
                     auto& activeParams = connection.data[U("active")][U("transport_params")][0];
                     auto& stagedParams = connection.data[U("staged")][U("transport_params")][0];
                     activeParams[U("mxl_domain_id")] = value::string(us(primaryDomainId));
@@ -624,7 +653,14 @@ namespace mxldl::nmosnode
                     jobs.pop();
                 }
                 auto cfgs = channels.channelConfigs();
-                if (auto const err = nmosroute::applyActivation(cfgs, legs, job.activation, domains, primaryDomainPath))
+                auto known = knownDomains();
+                if (job.activation.masterEnable &&
+                    std::none_of(known.begin(), known.end(), [&](nmosroute::DomainBinding const& d) { return d.id == job.activation.domainId; }))
+                {
+                    refreshDomains(); // a domain created after the start
+                    known = knownDomains();
+                }
+                if (auto const err = nmosroute::applyActivation(cfgs, legs, job.activation, known, primaryDomainPath))
                 {
                     log::error("nmos_activation_rejected", {{"leg", job.activation.legId}, {"details", *err}});
                     continue;
@@ -742,24 +778,7 @@ namespace mxldl::nmosnode
 
                 primaryDomainPath = cfg.domainPath;
                 primaryDomainId = cfg.outputDomainId.empty() ? mxlbridge::ensureDomainId(cfg.domainPath) : cfg.outputDomainId;
-                domains.clear();
-                bool sawPrimary = false;
-                for (auto const& found : mxlbridge::scanDomains(cfg.domainScanPath))
-                {
-                    if (!found.id)
-                    {
-                        continue;
-                    }
-                    domains.push_back(nmosroute::DomainBinding{*found.id, found.path});
-                    if (found.path == primaryDomainPath || (found.id && *found.id == primaryDomainId))
-                    {
-                        sawPrimary = true;
-                    }
-                }
-                if (!sawPrimary)
-                {
-                    domains.push_back(nmosroute::DomainBinding{primaryDomainId, primaryDomainPath});
-                }
+                refreshDomains();
                 legs = nmosroute::enumerateLegs(cfg, cardId);
 
                 // Park unassigned output receivers so they wait for IS-05 instead of retrying.
