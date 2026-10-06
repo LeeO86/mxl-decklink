@@ -125,7 +125,8 @@ registration.
 
 Senders write `MXL_OUTPUT_DOMAIN_DIR` (`MXL_DOMAIN_PATH` is the same setting).
 Its `domain_def.json` `id` is `mxl_domain_id`. Receivers may read any domain
-discovered under `MXL_DOMAIN_SCAN_PATH`. `master_enable` starts and stops that
+under `MXL_DOMAIN_SCAN_PATH`, also one created after the start: an activation
+that names an unknown domain scans the path again. `master_enable` starts and stops that
 leg's MXL writer or reader and is stored in the config file when the
 environment does not already pin `CHx_MXL_ACTIVE` / `CHx_AFn_MXL_ACTIVE`.
 

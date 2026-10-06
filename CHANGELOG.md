@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.2
+
+- MXL receivers accept domains created after the start. The IS-05 constraints listed `mxl_domain_id` as an `enum` of the domains found at startup (nmos-cpp writes a one-element `enum` when there was exactly one), so a PATCH naming a later domain, such as the output domain of a production deployed afterwards, failed with 400 until the pod restarted. The constraint no longer lists domains; an activation (or an `auto` resolution) that names an unknown domain or flow scans `MXL_DOMAIN_SCAN_PATH` again and is refused only if the domain is still not there. No settings change.
+
 ## 1.0.1
 
 - Hardware-timestamp recalibration steps to a delta above the 1 ms gate when the next recalibration is again above the gate in the same direction. Before, every such delta was rejected and the timestamps of a card without PTP lock drifted without bound (5 ms per minute on the lab DeckLink IP 100G; 315 s after six weeks). A single jump is still rejected. New log event `hw_clock_recalibration_stepped`.
