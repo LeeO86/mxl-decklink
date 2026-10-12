@@ -29,6 +29,7 @@ TEST_CASE("sync groups come and go while another channel releases readers of the
         AudioFlowParams p;
         p.id = *util::parseUuid("0b5c3a3e-6f3c-4c1e-9d1a-5a4e2f1b7c11");
         p.label = "sync-race";
+        p.groupHint = "sync-race:Audio";
         p.channelCount = 2;
         AudioWriter writer(domain, p, 1);
 
