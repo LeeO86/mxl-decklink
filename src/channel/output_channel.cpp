@@ -211,9 +211,9 @@ namespace mxldl::channel
                 }
             }
 
-            // Readers may live on a foreign domain instance; the group must
-            // be created on that same instance.
-            _sync = std::make_unique<mxlbridge::FlowSyncGroup>(readerDomain());
+            // The group gets its own instance of the readers' domain, so
+            // other channels releasing readers never walk it (flowsync.hpp).
+            _sync = std::make_unique<mxlbridge::FlowSyncGroup>(readerDomain().path());
             _sync->addReader(_videoReader->handle());
             for (auto const& af : _audioFlows)
             {
@@ -340,15 +340,32 @@ namespace mxldl::channel
     {
         _streamingUp.store(false);
         _playing.store(false);
-        _sync.reset();
         if (_playback)
         {
             _playback->stopPlayback();
             _playback->disable();
-            _playback.reset();
         }
-        _videoReader.reset();
-        _audioFlows.clear();
+        // The SDK does not promise that no completion or audio callback is
+        // still running after the stop: wait for one in flight, then take
+        // what it uses. Later callbacks see _playing false or no readers.
+        std::unique_ptr<mxlbridge::FlowSyncGroup> sync;
+        std::unique_ptr<dl::IPlaybackSession> playback;
+        std::unique_ptr<mxlbridge::VideoReader> videoReader;
+        std::vector<AudioFlowReader> audioFlows;
+        {
+            std::lock_guard const lock{_callbackMutex};
+            sync = std::move(_sync);
+            playback = std::move(_playback);
+            videoReader = std::move(_videoReader);
+            audioFlows.swap(_audioFlows);
+        }
+        // Freed outside the lock: releasing the SDK objects may wait for a
+        // callback, and a callback waits for the lock. The group goes before
+        // the readers it holds.
+        sync.reset();
+        playback.reset();
+        videoReader.reset();
+        audioFlows.clear();
     }
 
     bool OutputChannel::scheduleGrain(std::uint64_t grainIndex)
@@ -421,6 +438,7 @@ namespace mxldl::channel
 
     void OutputChannel::onFrameCompleted(std::uint64_t /*frameId*/, dl::CompletionResult result)
     {
+        std::lock_guard const callbackLock{_callbackMutex};
         if (!_playing.load())
         {
             return;
@@ -468,6 +486,7 @@ namespace mxldl::channel
 
     void OutputChannel::onRenderAudio(bool /*preroll*/)
     {
+        std::lock_guard const callbackLock{_callbackMutex};
         if (_audioFlows.empty() || !_playback)
         {
             return;

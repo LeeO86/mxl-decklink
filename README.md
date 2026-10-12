@@ -53,11 +53,12 @@ MXL v1.1 API rather than the spec's paraphrase of it).
 
 Requirements: Linux, CMake ≥ 3.24, GCC ≥ 12 or Clang ≥ 16, Node.js ≥ 20
 (for the Vue web UI build), and an installed
-[MXL](https://github.com/dmf-mxl/mxl) v1.1.0 (`find_package(mxl)`).
+[MXL](https://github.com/dmf-mxl/mxl) `release/v1.1` at `218ddaa` (`find_package(mxl)`).
 
 ```bash
-# Build and install MXL v1.1.0 first (uses vcpkg for its dependencies):
-git clone --branch v1.1.0 https://github.com/dmf-mxl/mxl
+# Build and install MXL release/v1.1 at 218ddaa first (uses vcpkg for its dependencies):
+git clone --branch release/v1.1 https://github.com/dmf-mxl/mxl
+git -C mxl checkout --detach 218ddaa0a08c12ffe75fc475ae65aa3d9eef16d7
 cmake -S mxl -B mxl/build -G Ninja \
   -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake \
   -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF -DBUILD_TOOLS=OFF \
@@ -311,7 +312,9 @@ Documented in detail in IMPLEMENTATION_PLAN.md §3:
   `mxlFlowReaderGetMaxReadLengthSamples`. Larger DeckLink packets are split.
 - **Output alignment** uses `mxlFlowSynchronizationGroup`: before each video
   grain is read, the channel waits until that grain and the audio samples at
-  the same TAI time are available.
+  the same TAI time are available. Each channel's group lives on its own MXL
+  instance of the domain: MXL walks the groups of a reader's instance without
+  locking them when a reader is released.
 - **Grain commit semantics** follow the real API (`validSlices`/`totalSlices`
   and `MXL_GRAIN_FLAG_INVALID`) rather than the spec's `committedSize` field.
 

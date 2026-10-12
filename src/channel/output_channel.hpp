@@ -82,6 +82,9 @@ namespace mxldl::channel
 
         // Scheduling state (completion-driven, §2.4).
         std::mutex _scheduleMutex;
+        /// Held by each DeckLink callback for its whole run; teardown takes it
+        /// after stopping playback, before it frees the group and readers.
+        std::mutex _callbackMutex;
         std::uint64_t _nextGrainIndex = 0;
         std::uint64_t _scheduledFrames = 0;
         std::vector<std::uint8_t> _lastFrame; // repeated on reader timeout

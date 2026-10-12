@@ -30,7 +30,8 @@ N/A: SDP, ICE, and SRT addresses (this function does not speak those transports)
 - **Language / toolchain:** C++20, CMake ≥ 3.24, GCC ≥ 12 or Clang ≥ 16. No exceptions
   crossing module boundaries on the hot path; `mxlStatus`/`HRESULT`-style result codes
   internally where it matters.
-- **MXL:** built from `dmf-mxl/mxl` tag `v1.1.0` and consumed via
+- **MXL:** built from `dmf-mxl/mxl` branch `release/v1.1` at `218ddaa` (tag `v1.1.0`
+  until 1.0.2; it adds the writer fix `b8ec4bb6` and the reader check `d66dcf3c`) and consumed via
   `find_package(mxl CONFIG REQUIRED)`. Only the public C API (`mxl/mxl.h`, `mxl/flow.h`,
   `mxl/time.h`) is used.
 - **DeckLink SDK:** the Linux interface headers plus `DeckLinkAPIDispatch.cpp`
@@ -107,7 +108,7 @@ The MXL v1.1 sources were reviewed before design; the implementation is built on
 | `mxlFlowWriterOpenGrain(inst, writer, index, …)`; `grainInfo.committedSize` | Signature is `mxlFlowWriterOpenGrain(writer, index, &grainInfo, &payload)`; completion is tracked via `grainInfo.validSlices == totalSlices`, not `committedSize` | Writers set `validSlices = totalSlices` (full-frame commit) and use `MXL_GRAIN_FLAG_INVALID` for gaps |
 | `CHx_GRAIN_COUNT` / `CHx_AUDIO_BUFFER_MS` size the rings per flow | Ring depth is **domain-global**: `grainCount = history_duration × rate` from `{domain}/options.json` (`urn:x-mxl:option:history_duration/v1.0`, default 200 ms). The public API cannot set a per-flow depth | The container derives the *requested* history duration from these variables and, when creating a flow yields a different actual depth, logs a structured warning and exports the actual depth via `/statusz` + metrics. It never rewrites a mounted domain's `options.json` (the domain is shared infrastructure per §4.1) |
 | `CHx_COMMIT_BATCH_HINT` → `maxCommitBatchSizeHint` | Passed as writer-options JSON `{"maxCommitBatchSizeHint": N}` to `mxlCreateFlowWriter` | Implemented exactly so |
-| `mxlFlowSynchronizationGroup` for output alignment | Present since v1.1. `WaitForDataAt` takes a TAI timestamp (`mxlIndexToTimestamp`), not a grain index. Audio read/write length is capped by `mxlFlowReaderGetMaxReadLengthSamples` / `mxlFlowWriterGetMaxWriteLengthSamples` (half the ring on the POSIX backend) | Each output channel builds a group of its video reader and active audio readers and waits on the grain timestamp before `mxlFlowReaderGetGrain`. Audio batches larger than the max length are split |
+| `mxlFlowSynchronizationGroup` for output alignment | Present since v1.1. `WaitForDataAt` takes a TAI timestamp (`mxlIndexToTimestamp`), not a grain index. Audio read/write length is capped by `mxlFlowReaderGetMaxReadLengthSamples` / `mxlFlowWriterGetMaxWriteLengthSamples` (half the ring on the POSIX backend). Releasing a reader's last reference walks every sync group of the reader's instance, while creating and releasing a group change that list without the instance mutex (`Instance.cpp:145-165`, `439-455` at `218ddaa`) | Each output channel builds a group of its video reader and active audio readers and waits on the grain timestamp before `mxlFlowReaderGetGrain`. The group lives on its own `mxlInstance` of the readers' domain, which holds no readers (1.0.3; before, another channel releasing a reader could crash in `FlowSynchronizationGroup::removeReader`). Audio batches larger than the max length are split |
 | Audio sample index semantics | `mxlFlowWriterOpenSamples(writer, index, count, …)` addresses the `count` samples **ending at** `index` (same convention as `mxlFlowReaderGetSamples`) | `audiowriter` computes `index = mxlTimestampToIndex(48000/1, tai_first_sample) + count` |
 | ANC flow "per RFC 8331 §2 from the length field onward" | MXL only fixes the container: `format: data`, `media_type: video/smpte291`, 4096-byte grains, 1-byte slices | `anc.cpp` serializes `Length(16) ANC_Count(8) F(2) reserved(22)` followed by 10-bit-packed ANC data packets (C, Line, HO, S, StreamNum, DID, SDID, DC, UDW, CS, word-aligned) — the RFC 8331 payload after the RTP-specific fields |
 | Timestamps via `CLOCK_TAI` | `mxlGetTime()` **is** `CLOCK_TAI`-based; all index math uses 128-bit rounding | The container uses `mxlGetTime`/`mxlTimestampToIndex` for all index math so container and readers can never disagree; hardware calibration (§3.5) is an offset applied before index conversion, recalibrated every 60 s with a 1 ms sanity gate. Deviation from §3.5: a second delta above the gate in the same direction is applied (steady drift of a card without PTP lock), otherwise the offset never recovers |
@@ -148,6 +149,13 @@ Everything else follows the spec directly:
 - **§7 ops** — `/livez` (housekeeping heartbeat < 5 s), `/readyz`
   (`MXL_HEALTH_MIN_HEALTHY_CHANNELS` threshold, JSON body on 503), `/statusz` (full
   report), `/metrics` with the complete §7.3 metric set and label conventions.
+- **Known issue (open, for a later release): shared reader handles.** MXL keeps one
+  reader per flow id per instance and only counts references
+  (`Instance::getFlowReader`, dmf-mxl/mxl@218ddaa `lib/internal/src/Instance.cpp`).
+  Two output channels that read the same flow of this function's own domain (shared
+  instance) therefore get the same `mxlFlowReader` and use it from two threads, against
+  SPEC §2 ("no handle sharing between threads"). Channels reading another function's
+  domain have their own instance and are not affected.
 
 ## 4. The mock backend (test strategy, not spec scope creep)
 
@@ -168,7 +176,7 @@ The abstraction is intentionally thin (value types + 3 interfaces) so the hot pa
 
 ## 5. Containers and deployment
 
-- **Dockerfile** (multi-stage, `ubuntu:24.04`): stage 1 builds MXL v1.1.0 (vcpkg
+- **Dockerfile** (multi-stage, `ubuntu:24.04`): stage 1 builds MXL `MXL_REVISION` from `MXL_REF` (vcpkg
   manifest, `Linux-GCC-Release` preset) and Sony nmos-cpp, then this application
   with `MXL_DECKLINK_NMOS=ON`; stage 2 is the slim runtime (including the
   nmos-cpp shared libraries) with a non-root user (uid 1000, group `video`),

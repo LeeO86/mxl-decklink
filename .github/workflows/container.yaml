@@ -55,16 +55,6 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.licenses=MIT
 
-      - name: Resolve MXL revision
-        id: mxlrev
-        run: |
-          # Peeled tag commit. v1.1.0 is the MXL release this image builds.
-          rev=$(git ls-remote https://github.com/dmf-mxl/mxl.git 'refs/tags/v1.1.0^{}' | awk '{print $1}')
-          if [ -z "$rev" ]; then
-            rev=$(git ls-remote https://github.com/dmf-mxl/mxl.git refs/tags/v1.1.0 | awk '{print $1}')
-          fi
-          echo "rev=$rev" >> "$GITHUB_OUTPUT"
-
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
@@ -76,9 +66,9 @@ jobs:
           # Optional: bake Blackmagic Desktop Video userland into the image
           # when a downloadable URL is available (repo secret/variable).
           # Without it the image expects DECKLINK_LIB_MODE=hostmount.
+          # MXL_REF / MXL_REVISION come from the Dockerfile defaults.
           build-args: |
             DESKTOPVIDEO_DEB_URL=${{ secrets.DESKTOPVIDEO_DEB_URL }}
-            MXL_REVISION=${{ steps.mxlrev.outputs.rev }}
           # The build stage compiles vcpkg deps + MXL and runs the unit tests;
           # the GHA layer cache keeps repeat builds fast.
           cache-from: type=gha
