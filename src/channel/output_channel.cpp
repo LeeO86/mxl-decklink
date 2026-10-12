@@ -346,13 +346,26 @@ namespace mxldl::channel
             _playback->disable();
         }
         // The SDK does not promise that no completion or audio callback is
-        // still running after the stop: wait for one in flight, then free
+        // still running after the stop: wait for one in flight, then take
         // what it uses. Later callbacks see _playing false or no readers.
-        std::lock_guard const lock{_callbackMutex};
-        _sync.reset();
-        _playback.reset();
-        _videoReader.reset();
-        _audioFlows.clear();
+        std::unique_ptr<mxlbridge::FlowSyncGroup> sync;
+        std::unique_ptr<dl::IPlaybackSession> playback;
+        std::unique_ptr<mxlbridge::VideoReader> videoReader;
+        std::vector<AudioFlowReader> audioFlows;
+        {
+            std::lock_guard const lock{_callbackMutex};
+            sync = std::move(_sync);
+            playback = std::move(_playback);
+            videoReader = std::move(_videoReader);
+            audioFlows.swap(_audioFlows);
+        }
+        // Freed outside the lock: releasing the SDK objects may wait for a
+        // callback, and a callback waits for the lock. The group goes before
+        // the readers it holds.
+        sync.reset();
+        playback.reset();
+        videoReader.reset();
+        audioFlows.clear();
     }
 
     bool OutputChannel::scheduleGrain(std::uint64_t grainIndex)
