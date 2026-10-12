@@ -340,13 +340,17 @@ namespace mxldl::channel
     {
         _streamingUp.store(false);
         _playing.store(false);
-        _sync.reset();
         if (_playback)
         {
             _playback->stopPlayback();
             _playback->disable();
-            _playback.reset();
         }
+        // The SDK does not promise that no completion or audio callback is
+        // still running after the stop: wait for one in flight, then free
+        // what it uses. Later callbacks see _playing false or no readers.
+        std::lock_guard const lock{_callbackMutex};
+        _sync.reset();
+        _playback.reset();
         _videoReader.reset();
         _audioFlows.clear();
     }
@@ -421,6 +425,7 @@ namespace mxldl::channel
 
     void OutputChannel::onFrameCompleted(std::uint64_t /*frameId*/, dl::CompletionResult result)
     {
+        std::lock_guard const callbackLock{_callbackMutex};
         if (!_playing.load())
         {
             return;
@@ -468,6 +473,7 @@ namespace mxldl::channel
 
     void OutputChannel::onRenderAudio(bool /*preroll*/)
     {
+        std::lock_guard const callbackLock{_callbackMutex};
         if (_audioFlows.empty() || !_playback)
         {
             return;

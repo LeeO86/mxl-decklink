@@ -149,6 +149,13 @@ Everything else follows the spec directly:
 - **§7 ops** — `/livez` (housekeeping heartbeat < 5 s), `/readyz`
   (`MXL_HEALTH_MIN_HEALTHY_CHANNELS` threshold, JSON body on 503), `/statusz` (full
   report), `/metrics` with the complete §7.3 metric set and label conventions.
+- **Known issue (open, for a later release): shared reader handles.** MXL keeps one
+  reader per flow id per instance and only counts references
+  (`Instance::getFlowReader`, dmf-mxl/mxl@218ddaa `lib/internal/src/Instance.cpp`).
+  Two output channels that read the same flow of this function's own domain (shared
+  instance) therefore get the same `mxlFlowReader` and use it from two threads, against
+  SPEC §2 ("no handle sharing between threads"). Channels reading another function's
+  domain have their own instance and are not affected.
 
 ## 4. The mock backend (test strategy, not spec scope creep)
 
