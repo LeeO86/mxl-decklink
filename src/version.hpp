@@ -3,5 +3,5 @@
 
 namespace mxldl
 {
-    inline constexpr char const* kVersion = "1.0.2";
+    inline constexpr char const* kVersion = "1.0.3";
 }

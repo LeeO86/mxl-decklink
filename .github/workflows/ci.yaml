@@ -9,7 +9,10 @@ jobs:
   build-and-test:
     runs-on: ubuntu-24.04
     env:
-      MXL_REF: v1.1.0
+      # MXL branch and the commit on it that is built.
+      # Keep in sync with docker/Dockerfile ARG MXL_REF / MXL_REVISION.
+      MXL_REF: release/v1.1
+      MXL_REVISION: 218ddaa0a08c12ffe75fc475ae65aa3d9eef16d7
       # sony/nmos-cpp commit that includes the MXL transport (BCP-007-03).
       # Keep in sync with docker/Dockerfile ARG NMOS_CPP_REF.
       NMOS_CPP_REF: fe303849527394b03bdedc8f161f377fe458bb62
@@ -41,14 +44,16 @@ jobs:
           path: |
             /opt/mxl
             mxl-vcpkg-installed
-          key: mxl-${{ env.MXL_REF }}-ubuntu-24.04-v1
+          key: mxl-${{ env.MXL_REVISION }}-ubuntu-24.04-v1
 
       - name: Build MXL
         if: steps.cache-mxl.outputs.cache-hit != 'true'
         run: |
           git clone https://github.com/microsoft/vcpkg "$HOME/vcpkg"
           "$HOME/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
-          git clone --branch "$MXL_REF" https://github.com/dmf-mxl/mxl /tmp/mxl
+          git clone --filter=blob:none --branch "$MXL_REF" https://github.com/dmf-mxl/mxl /tmp/mxl
+          git -C /tmp/mxl merge-base --is-ancestor "$MXL_REVISION" HEAD
+          git -C /tmp/mxl checkout -q --detach "$MXL_REVISION"
           cmake -S /tmp/mxl -B /tmp/mxl/build -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE="$HOME/vcpkg/scripts/buildsystems/vcpkg.cmake" \
             -DCMAKE_BUILD_TYPE=Release \

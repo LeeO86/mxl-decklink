@@ -211,9 +211,9 @@ namespace mxldl::channel
                 }
             }
 
-            // Readers may live on a foreign domain instance; the group must
-            // be created on that same instance.
-            _sync = std::make_unique<mxlbridge::FlowSyncGroup>(readerDomain());
+            // The group gets its own instance of the readers' domain, so
+            // other channels releasing readers never walk it (flowsync.hpp).
+            _sync = std::make_unique<mxlbridge::FlowSyncGroup>(readerDomain().path());
             _sync->addReader(_videoReader->handle());
             for (auto const& af : _audioFlows)
             {

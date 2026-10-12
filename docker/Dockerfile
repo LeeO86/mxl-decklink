@@ -2,7 +2,10 @@
 # Multi-stage build per SPECIFICATION.md §5.1.
 #
 # Build args:
-#   MXL_REF               dmf-mxl/mxl git ref to build against (default v1.1.0)
+#   MXL_REF               dmf-mxl/mxl branch to build from (default release/v1.1)
+#   MXL_REVISION          commit on MXL_REF that is built; also the
+#                         io.dmf.mxl.revision label. Keep both in sync with
+#                         .github/workflows/ci.yaml.
 #   NMOS_CPP_REF          sony/nmos-cpp commit with the MXL transport (BCP-007-03).
 #                         Keep in sync with .github/workflows/ci.yaml.
 #   DESKTOPVIDEO_DEB_URL  optional URL of the Blackmagic Desktop Video
@@ -11,6 +14,9 @@
 #                         (DECKLINK_LIB_MODE=hostmount). Pass via
 #                         --build-arg or the DESKTOPVIDEO_DEB_URL repository
 #                         secret / variable in the container workflow.
+
+ARG MXL_REF=release/v1.1
+ARG MXL_REVISION=218ddaa0a08c12ffe75fc475ae65aa3d9eef16d7
 
 # ---------------------------------------------------------------------------
 # Vue web UI (§7.5) — builds a single-file dist/index.html for embedding.
@@ -24,7 +30,8 @@ RUN npm run build
 # ---------------------------------------------------------------------------
 FROM ubuntu:24.04 AS build
 
-ARG MXL_REF=v1.1.0
+ARG MXL_REF
+ARG MXL_REVISION
 ARG NMOS_CPP_REF=fe303849527394b03bdedc8f161f377fe458bb62
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -41,8 +48,13 @@ RUN git clone https://github.com/microsoft/vcpkg /opt/vcpkg \
     && /opt/vcpkg/bootstrap-vcpkg.sh -disableMetrics
 ENV VCPKG_ROOT=/opt/vcpkg
 
-# MXL v1.1.0 (Apache-2.0), installed to /opt/mxl.
-RUN git clone --branch "${MXL_REF}" https://github.com/dmf-mxl/mxl /tmp/mxl \
+# MXL (Apache-2.0), installed to /opt/mxl. A branch moves on: build the pinned
+# commit MXL_REVISION, which must be on MXL_REF.
+RUN git clone --filter=blob:none --branch "${MXL_REF}" https://github.com/dmf-mxl/mxl /tmp/mxl \
+    && git -C /tmp/mxl merge-base --is-ancestor "${MXL_REVISION}" HEAD \
+    && git -C /tmp/mxl checkout -q --detach "${MXL_REVISION}" \
+    && actual="$(git -C /tmp/mxl rev-parse HEAD)" \
+    && if [ "$actual" != "${MXL_REVISION}" ]; then echo "MXL ${MXL_REF} is ${actual}, MXL_REVISION says ${MXL_REVISION}" >&2; exit 1; fi \
     && cmake -S /tmp/mxl -B /tmp/mxl/build -G Ninja \
         -DCMAKE_TOOLCHAIN_FILE=/opt/vcpkg/scripts/buildsystems/vcpkg.cmake \
         -DCMAKE_BUILD_TYPE=Release \
@@ -102,7 +114,7 @@ RUN ldconfig && chmod +x /usr/local/bin/entrypoint.sh
 # Non-root (platform uid/gid 1000). Ubuntu 24.04 already has uid/gid 1000
 # (user ubuntu). The video group is only so the process can open
 # /dev/blackmagic (root:video). No root, no host IPC.
-ARG MXL_REVISION=unknown
+ARG MXL_REVISION
 LABEL org.opencontainers.image.source="https://github.com/LeeO86/mxl-decklink" \
       org.opencontainers.image.licenses="MIT" \
       io.dmf.mxl.revision="${MXL_REVISION}"

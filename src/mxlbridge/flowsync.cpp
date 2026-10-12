@@ -5,23 +5,25 @@
 
 namespace mxldl::mxlbridge
 {
-    FlowSyncGroup::FlowSyncGroup(Domain& domain)
-        : _domain(domain)
+    FlowSyncGroup::FlowSyncGroup(std::string const& domainPath)
+        : _instance(::mxlCreateInstance(domainPath.c_str(), nullptr))
     {
-        auto const status = ::mxlCreateFlowSynchronizationGroup(domain.instance(), &_group);
+        if (_instance == nullptr)
+        {
+            throw std::runtime_error("mxlCreateInstance failed for the sync group of domain: " + domainPath);
+        }
+        auto const status = ::mxlCreateFlowSynchronizationGroup(_instance, &_group);
         if (status != MXL_STATUS_OK || _group == nullptr)
         {
-            _group = nullptr;
+            ::mxlDestroyInstance(_instance);
             throw std::runtime_error("mxlCreateFlowSynchronizationGroup failed with status " + std::to_string(status));
         }
     }
 
     FlowSyncGroup::~FlowSyncGroup()
     {
-        if (_group != nullptr)
-        {
-            ::mxlReleaseFlowSynchronizationGroup(_domain.instance(), _group);
-        }
+        ::mxlReleaseFlowSynchronizationGroup(_instance, _group);
+        ::mxlDestroyInstance(_instance);
     }
 
     void FlowSyncGroup::addReader(mxlFlowReader reader)

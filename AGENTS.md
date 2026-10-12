@@ -17,7 +17,8 @@ with no hardware. Canonical build/run/test commands live in `README.md`
 The external MXL dependency is expensive to build and is prebuilt into the image,
 so the startup update script does not rebuild it:
 
-- `/opt/mxl` — MXL v1.1.0 installed (`libmxl.so`, headers, CMake config).
+- `/opt/mxl` — MXL installed (`libmxl.so`, headers, CMake config). The snapshot has
+  `v1.1.0`; CI and the image build `release/v1.1` at `218ddaa` (same API).
 - `~/mxl/build/vcpkg_installed/x64-linux` — MXL's vcpkg dependencies (`fmt`,
   `spdlog`, `stduuid`, `picojson`, `ada-url`); put this on `CMAKE_PREFIX_PATH` when building
   this app.
@@ -52,6 +53,9 @@ Build dependencies for that option are Boost, `libcpprest-dev`,
 `nlohmann-json3-dev`, OpenSSL, and `libavahi-compat-libdnssd-dev`. A checkout
 of that commit is expected at `/tmp/nmos-cpp` (the `Development/` directory).
 
+The MXL pins (`MXL_REF` branch, `MXL_REVISION` commit on it) live only in
+`.github/workflows/ci.yaml` and `docker/Dockerfile`; change them together.
+
 Run the service directly with the mock backend by setting `MXL_DECKLINK_BACKEND=mock`
 plus the `CHx_*` variables from `README.md` §Running (always with
 `LD_LIBRARY_PATH=/opt/mxl/lib`). Lint = compiler warnings: the build uses
@@ -69,6 +73,6 @@ smaller mode/history or a larger tmpfs.
 ### If `/opt/mxl` is ever missing
 
 Rebuild it (only needed if the snapshot lost it) following `.github/workflows/ci.yaml`
-"Build MXL": clone `dmf-mxl/mxl` at `v1.1.0`, configure with the `~/vcpkg` toolchain,
+"Build MXL": clone `dmf-mxl/mxl` branch `MXL_REF` and check out `MXL_REVISION`, configure with the `~/vcpkg` toolchain,
 install to `/opt/mxl`, and keep `build/vcpkg_installed/x64-linux` for
 `CMAKE_PREFIX_PATH`.
