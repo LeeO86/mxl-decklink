@@ -174,7 +174,7 @@ With `WEB_ENABLE=true`: `GET /`, `GET /api/status`, `GET /api/card`, `GET /api/c
 
 The export document is `{"settings":{...}}` of the config file. It contains no secrets (this function stores none). Import replaces that file. Environment variables still win on the next start.
 
-Settings are listed in `SPECIFICATION.md` §4. On the platform, set `NMOS_SEED`, `NMOS_TAGS`, `NMOS_REGISTRY_ADDRESS`, `NMOS_DNS_SD=false`, `MXL_OUTPUT_DOMAIN_DIR`, `MXL_DOMAIN_SCAN_PATH=/Volumes/mxl`, and `MXL_CLEANUP_ON_EXIT=true`. Leave `NMOS_HOST_ADDRESS` unset so the pod IP is announced.
+Settings are listed in `SPECIFICATION.md` §4. `CHx_SDI_LEVEL` (`A`, `B`, `driver`; default `A`) sets an output's 3G-SDI level before it starts: `A` is SMPTE Level A on a single link for HD modes (1080p50 then shows as 1080p50, not 1080i50, on receivers that read Level B as interlaced); `driver` keeps the Desktop Video setting. A card without Level A support keeps the driver's setting (log `sdi_level_not_set`). The effective level is in `/api/card` and `/statusz` (`sdi_output`). On the platform, set `NMOS_SEED`, `NMOS_TAGS`, `NMOS_REGISTRY_ADDRESS`, `NMOS_DNS_SD=false`, `MXL_OUTPUT_DOMAIN_DIR`, `MXL_DOMAIN_SCAN_PATH=/Volumes/mxl`, and `MXL_CLEANUP_ON_EXIT=true`. Leave `NMOS_HOST_ADDRESS` unset so the pod IP is announced.
 
 
 The Blackmagic **DeckLink interface headers** are vendored under

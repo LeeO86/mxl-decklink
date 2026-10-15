@@ -81,6 +81,12 @@ namespace mxldl::dl
 
         virtual std::uint32_t bufferedVideoFrames() = 0;
         virtual std::uint32_t bufferedAudioFrames() = 0;
+        /// The card's playback position in ns since startPlayback (frame n
+        /// is shown at n frame durations), or nullopt when unknown.
+        virtual std::optional<std::uint64_t> streamTimeNs()
+        {
+            return std::nullopt;
+        }
         /// Reference lock status (genlock / PTP on IP cards, §3.6).
         virtual bool referenceLocked() = 0;
     };
@@ -97,6 +103,15 @@ namespace mxldl::dl
         virtual SubDeviceStatus status() = 0;
         virtual std::unique_ptr<ICaptureSession> openCapture() = 0;
         virtual std::unique_ptr<IPlaybackSession> openPlayback() = 0;
+        /// Sets the 3G-SDI output level before an output starts (§7.1
+        /// CHx_SDI_LEVEL). The default does nothing (a backend without it).
+        virtual SdiLevelResult setSdiOutputLevel(config::SdiLevel level, config::VideoMode const& /*mode*/)
+        {
+            SdiLevelResult r;
+            r.fallback = level != config::SdiLevel::Driver;
+            r.details = "this backend cannot set the SDI level; the driver's setting stays";
+            return r;
+        }
     };
 
     /// Events raised by the card outside stream callbacks.

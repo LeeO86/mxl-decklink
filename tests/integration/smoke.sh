@@ -179,9 +179,10 @@ out_frames1=$(statusz_field smoke-out frames_total) || out_frames1=0
 sleep 1
 out_frames2=$(statusz_field smoke-out frames_total) || out_frames2=0
 (( out_frames2 > out_frames1 )) || fail "output frames not advancing: $out_frames1 → $out_frames2"
-# The output reports the card's SDI output signalling (read only; the mock reports Level B).
+# The output set CHx_SDI_LEVEL (default A) and reports the effective signalling.
 sdi_out=$(statusz_field smoke-out sdi_output) || sdi_out=err
-[[ "$sdi_out" == *"'smpte_level': 'B'"* ]] || fail "/statusz sdi_output of the output: $sdi_out"
+[[ "$sdi_out" == *"'smpte_level': 'A'"* && "$sdi_out" == *"'link_configuration': 'single'"* && "$sdi_out" == *"'requested_level': 'A'"* ]] ||
+    fail "/statusz sdi_output of the output: $sdi_out"
 
 # MXL domain must contain the flows.
 for flow in 5fbec3b1-1b0f-417d-9059-8b94a47197ed b3bb5be7-9fe9-4324-a5bb-4c70e1084449 db3bd465-2772-484f-8fac-830b0471258b; do
@@ -370,7 +371,7 @@ assert a['flows'][0].get('mxl_present') is True, a
 detected=$(webapi /api/card | python3 -c "import json,sys; print(json.load(sys.stdin)['subdevices'][0]['status']['detected_input_mode'])") || detected=err
 [[ "$detected" == "HD720p50" ]] || fail "web /api/card detected input mode: $detected"
 
-# The card's SDI output signalling is reported (read only; the mock reports Level B).
+# The card's SDI output signalling is reported; no output has set it in this run (the mock's default is Level B).
 level=$(webapi /api/card | python3 -c "import json,sys; print(json.load(sys.stdin)['subdevices'][0]['status']['sdi_output']['smpte_level'])") || level=err
 [[ "$level" == "B" ]] || fail "web /api/card sdi_output.smpte_level: $level"
 

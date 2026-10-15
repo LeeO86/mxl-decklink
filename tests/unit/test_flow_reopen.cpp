@@ -102,6 +102,8 @@ namespace
         std::vector<std::int64_t> grains;
         std::vector<std::pair<std::int64_t, std::int64_t>> avPairs;
         std::atomic<int> delayMs{0}; // the card holds the next completion this long
+        std::atomic<int> deliveryLatencyUs{0}; // every completion call comes this late (a real card's latency)
+        std::atomic<bool> reportStreamTime{true}; // the card reports its playback position
 
         /// Median of audio block - video grain over the pairs from `from`:
         /// constant while audio and video stay in sync.
@@ -285,6 +287,10 @@ namespace
                             _queue.pop_front();
                         }
                     }
+                    if (auto const latency = _played->deliveryLatencyUs.load(); latency > 0)
+                    {
+                        std::this_thread::sleep_for(std::chrono::microseconds(latency));
+                    }
                     if (auto const delay = _played->delayMs.exchange(0); delay > 0)
                     {
                         // Output-side trouble: the card's calls come late,
@@ -331,6 +337,15 @@ namespace
             return true;
         }
 
+        std::optional<std::uint64_t> streamTimeNs() override
+        {
+            if (!_running || !_played->reportStreamTime)
+            {
+                return std::nullopt;
+            }
+            return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - _start).count());
+        }
+
     private:
         std::shared_ptr<Played> _played;
         Params _params;
@@ -370,7 +385,32 @@ namespace
             return st;
         }
 
+        dl::SdiLevelResult setSdiOutputLevel(config::SdiLevel level, config::VideoMode const& mode) override
+        {
+            levelCalls.push_back(level);
+            dl::SdiLevelResult r;
+            if (level == config::SdiLevel::Driver)
+            {
+                return r;
+            }
+            if (level == config::SdiLevel::A && !sdi.supportsSmpteLevelA.value_or(false))
+            {
+                r.fallback = true;
+                r.details = "the card does not support SMPTE Level A output";
+                return r;
+            }
+            sdi.smpteLevelA = level == config::SdiLevel::A;
+            r.applied = true;
+            if (level == config::SdiLevel::A && mode.height <= 1080 && sdi.linkConfiguration != "single")
+            {
+                sdi.linkConfiguration = "single";
+                r.linkChanged = true;
+            }
+            return r;
+        }
+
         dl::SdiOutputConfig sdi; // what the fake card reports
+        std::vector<config::SdiLevel> levelCalls;
 
         std::unique_ptr<dl::ICaptureSession> openCapture() override
         {
@@ -457,6 +497,7 @@ namespace
         /// The newest grain has only half its slices until the next one is
         /// written (a writer that commits slice by slice).
         std::atomic<bool> partialNewest{false};
+        std::atomic<int> invalidNext{0}; // the next grains written are marked invalid
 
     private:
         void put(std::uint64_t index)
@@ -465,9 +506,16 @@ namespace
             {
                 std::memcpy(_frame.data() + kStampAt, &index, sizeof index);
             }
-            if (_invalidLeft > 0)
+            if (_invalidLeft > 0 || invalidNext > 0)
             {
-                --_invalidLeft;
+                if (_invalidLeft > 0)
+                {
+                    --_invalidLeft;
+                }
+                else
+                {
+                    --invalidNext;
+                }
                 (void)_writer.writeInvalid(index);
             }
             else if (partialNewest)
@@ -848,6 +896,8 @@ TEST_CASE("a source stall repeats the last frame and plays silence without a pre
     // reported them late, and 25 late frames in 10 s reset the channel.
     Rig rig("stall");
     rig.withAudio();
+    // A real card calls back a few ms after a frame completed.
+    rig.played->deliveryLatencyUs = 4000;
     auto video = std::make_unique<VideoSource>(*rig.domain, rig.video, kGen1);
     auto audio = std::make_unique<AudioSource>(*rig.domain, rig.audio, 0x10000000);
     std::this_thread::sleep_for(200ms);
@@ -886,8 +936,8 @@ TEST_CASE("a source stall repeats the last frame and plays silence without a pre
     // No output-side trouble: nothing late (a busy test host may delay a
     // frame or two) or dropped, no preroll reset, and the stall is not a
     // re-created flow.
-    CHECK(rig.played->lateFrames() <= 2);
-    CHECK(rig.counter("mxl_decklink_frames_late_total") == static_cast<double>(rig.played->lateFrames()));
+    CHECK(rig.played->lateFrames() == 0);
+    CHECK(rig.counter("mxl_decklink_frames_late_total") == 0.0);
     CHECK(rig.counter("mxl_decklink_frames_dropped_total") == 0.0);
     CHECK(out.status().framesDropped.load() == 0);
     CHECK(out.status().framesRepeated.load() >= 100);
@@ -1215,7 +1265,9 @@ TEST_CASE("a new session does not repeat the previous session's picture")
     auto second = std::make_unique<VideoSource>(*rig.domain, rig.video, kGen2, true);
     auto const from = rig.played->frameCount();
     out.start();
-    REQUIRE(waitUntil([&] { return !logs.of("preroll_grain_unavailable").empty(); }, 3s));
+    // No grain at all: the preroll waits for the first one, then the
+    // bring-up fails and retries.
+    REQUIRE(waitUntil([&] { return !logs.of("preroll_no_grain_yet").empty(); }, 3s));
     CHECK(rig.played->countSince(from, kGen1) == 0);
     CHECK(out.status().state.load() != channel::State::Healthy);
     second->paused = false;
@@ -1253,27 +1305,115 @@ TEST_CASE("a read out of the history moves on when the newest grain is still bei
     video.reset();
 }
 
-TEST_CASE("an output reports the card's SDI output level at bring-up (read only)")
+TEST_CASE("CHx_SDI_LEVEL is set before the output starts and the effective level is reported")
 {
-    Rig rig("sdilevel");
-    rig.sub->sdi.smpteLevelA = false; // the driver default on small: Level B
-    rig.sub->sdi.supportsSmpteLevelA = true;
-    rig.sub->sdi.output1080pAsPsF = false;
-    rig.sub->sdi.linkConfiguration = "single";
+    struct Case
+    {
+        config::SdiLevel level;
+        bool supportsA;
+        char const* expectedLevel;
+        char const* expectedLink;
+        char const* expectedLog;
+    };
+    // The card on small: Level B, dual link, Level A supported.
+    for (auto const& c : {Case{config::SdiLevel::A, true, "A", "single", "sdi_level_set"},
+                          Case{config::SdiLevel::B, true, "B", "dual", "sdi_level_set"},
+                          Case{config::SdiLevel::Driver, true, "B", "dual", ""},
+                          Case{config::SdiLevel::A, false, "B", "dual", "sdi_level_not_set"}})
+    {
+        CAPTURE(config::sdiLevelName(c.level));
+        CAPTURE(c.supportsA);
+        Rig rig("sdilevel");
+        rig.ch.sdiLevel = c.level;
+        rig.sub->sdi.smpteLevelA = false;
+        rig.sub->sdi.supportsSmpteLevelA = c.supportsA;
+        rig.sub->sdi.output1080pAsPsF = false;
+        rig.sub->sdi.linkConfiguration = "dual";
+        auto video = std::make_unique<VideoSource>(*rig.domain, rig.video, kGen1);
+        std::this_thread::sleep_for(100ms);
+        LogCapture logs;
+        channel::OutputChannel out(rig.global, rig.ch, *rig.sub, *rig.domain, rig.metrics, "test");
+        out.start();
+        REQUIRE(waitUntil([&] { return out.status().state.load() == channel::State::Healthy; }, 3s));
+        REQUIRE(rig.sub->levelCalls.size() == 1);
+        CHECK(rig.sub->levelCalls[0] == c.level);
+        auto const reported = out.status().sdiOutput();
+        CHECK(dl::smpteLevelName(reported) == std::string(c.expectedLevel));
+        CHECK(reported.linkConfiguration == std::optional<std::string>(c.expectedLink));
+        CHECK(reported.requestedLevel == std::optional<std::string>(config::sdiLevelName(c.level)));
+        if (*c.expectedLog != 0)
+        {
+            CHECK(logs.of(c.expectedLog).size() == 1);
+        }
+        else
+        {
+            CHECK(logs.of("sdi_level_set").empty());
+            CHECK(logs.of("sdi_level_not_set").empty());
+        }
+        auto const lines = logs.of("sdi_output_config");
+        REQUIRE(lines.size() == 1);
+        CHECK(lines[0].find(std::string("\"smpte_level\":\"") + c.expectedLevel + "\"") != std::string::npos);
+        out.stop();
+        video.reset();
+    }
+    dl::SdiOutputConfig json;
+    json.smpteLevelA = true;
+    json.supportsSmpteLevelA = true;
+    json.output1080pAsPsF = false;
+    json.linkConfiguration = "single";
+    json.requestedLevel = "A";
+    CHECK(dl::sdiOutputJson(json) ==
+          "{\"smpte_level\":\"A\",\"supports_smpte_level_a\":true,\"output_1080p_as_psf\":false,\"link_configuration\":\"single\",\"requested_level\":\"A\"}");
+    CHECK(dl::sdiOutputJson({}) == "{\"smpte_level\":null,\"supports_smpte_level_a\":null,\"output_1080p_as_psf\":null,\"link_configuration\":null}");
+}
+
+TEST_CASE("an output comes up on an idle mirror whose first grain arrives 300 ms after the route")
+{
+    // The mirror flow exists with no grain yet (head index 0). The preroll
+    // waits for the first grain instead of failing the bring-up; audio is in
+    // sync with the first frame shown.
+    for (int readOffset : {0, 2})
+    {
+        CAPTURE(readOffset);
+        Rig rig(readOffset == 0 ? "idle0" : "idle2");
+        rig.withAudio();
+        rig.ch.readOffsetGrains = readOffset;
+        auto audio = std::make_unique<AudioSource>(*rig.domain, rig.audio, kStamped);
+        auto video = std::make_unique<VideoSource>(*rig.domain, rig.video, kGen1, true);
+        std::this_thread::sleep_for(50ms);
+        LogCapture logs;
+        channel::OutputChannel out(rig.global, rig.ch, *rig.sub, *rig.domain, rig.metrics, "test");
+        out.start();
+        std::this_thread::sleep_for(300ms);
+        CHECK(out.status().state.load() != channel::State::Failed);
+        video->paused = false; // the first grain
+        REQUIRE(waitUntil([&] { return out.status().state.load() == channel::State::Healthy; }, 1s));
+        CHECK(logs.of("preroll_grain_unavailable").empty());
+        CHECK(logs.of("channel_bringup_failed").empty());
+        CHECK(rig.reconnects() == 0.0);
+        REQUIRE(waitUntil([&] { return rig.played->pairCount() >= 30; }, 3s));
+        CHECK(rig.played->avOffset(5) == -rig.ch.outputPrerollGrains);
+        out.stop();
+        video.reset();
+        audio.reset();
+    }
+}
+
+TEST_CASE("a grain the source marked invalid repeats the frame as source_invalid, not as a read error")
+{
+    Rig rig("invalid");
+    LogCapture logs;
     auto video = std::make_unique<VideoSource>(*rig.domain, rig.video, kGen1);
     std::this_thread::sleep_for(200ms);
-    LogCapture logs;
     channel::OutputChannel out(rig.global, rig.ch, *rig.sub, *rig.domain, rig.metrics, "test");
     out.start();
     REQUIRE(waitUntil([&] { return out.status().state.load() == channel::State::Healthy; }, 3s));
-    CHECK(out.status().sdiOutput() == rig.sub->sdi);
-    auto const lines = logs.of("sdi_output_config");
-    REQUIRE(lines.size() == 1);
-    CHECK(lines[0].find("\"smpte_level\":\"B\"") != std::string::npos);
-    CHECK(lines[0].find("\"link_configuration\":\"single\"") != std::string::npos);
-    CHECK(dl::sdiOutputJson(rig.sub->sdi) ==
-          "{\"smpte_level\":\"B\",\"supports_smpte_level_a\":true,\"output_1080p_as_psf\":false,\"link_configuration\":\"single\"}");
-    CHECK(dl::sdiOutputJson({}) == "{\"smpte_level\":null,\"supports_smpte_level_a\":null,\"output_1080p_as_psf\":null,\"link_configuration\":null}");
+    video->invalidNext = 3; // a player's gap grains
+    REQUIRE(waitUntil([&] { return rig.counter("mxl_decklink_frames_repeated_total", "reason", "source_invalid") >= 1.0; }, 2s));
+    REQUIRE(waitUntil([&] { return !logs.of("source_invalid_grain").empty(); }, 2s));
+    CHECK(logs.of("source_invalid_grain")[0].find("\"level\":\"info\"") != std::string::npos);
+    CHECK(logs.of("grain_read_error").empty());
+    CHECK(rig.counter("mxl_decklink_frames_repeated_total", "reason", "read_error") == 0.0);
     out.stop();
     video.reset();
 }
