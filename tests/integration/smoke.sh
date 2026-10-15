@@ -179,6 +179,9 @@ out_frames1=$(statusz_field smoke-out frames_total) || out_frames1=0
 sleep 1
 out_frames2=$(statusz_field smoke-out frames_total) || out_frames2=0
 (( out_frames2 > out_frames1 )) || fail "output frames not advancing: $out_frames1 → $out_frames2"
+# The output reports the card's SDI output signalling (read only; the mock reports Level B).
+sdi_out=$(statusz_field smoke-out sdi_output) || sdi_out=err
+[[ "$sdi_out" == *"'smpte_level': 'B'"* ]] || fail "/statusz sdi_output of the output: $sdi_out"
 
 # MXL domain must contain the flows.
 for flow in 5fbec3b1-1b0f-417d-9059-8b94a47197ed b3bb5be7-9fe9-4324-a5bb-4c70e1084449 db3bd465-2772-484f-8fac-830b0471258b; do
@@ -370,8 +373,6 @@ detected=$(webapi /api/card | python3 -c "import json,sys; print(json.load(sys.s
 # The card's SDI output signalling is reported (read only; the mock reports Level B).
 level=$(webapi /api/card | python3 -c "import json,sys; print(json.load(sys.stdin)['subdevices'][0]['status']['sdi_output']['smpte_level'])") || level=err
 [[ "$level" == "B" ]] || fail "web /api/card sdi_output.smpte_level: $level"
-sdi_out=$(statusz_field smoke-out sdi_output) || sdi_out=err
-[[ "$sdi_out" == *"'smpte_level': 'B'"* ]] || fail "/statusz sdi_output of the output: $sdi_out"
 
 # Domain scan sees the current domain; flow browser lists CH0's flows.
 webapi /api/domains | python3 -c "
