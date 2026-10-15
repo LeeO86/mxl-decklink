@@ -811,8 +811,9 @@ TEST_CASE("output channel re-opens a re-created audio flow of its sync group")
     auto const sound = rig.played->soundBlocks();
     auto const grains = out.status().grainsCommitted.load();
     CHECK(waitUntil([&] { return rig.played->soundBlocks() >= sound + 10; }, 2s));
-    // Video went on from the live flow, not from repeated frames.
-    CHECK(out.status().grainsCommitted.load() >= grains + 10);
+    // Video went on from the live flow, not from repeated frames (sound and
+    // grains are counted on different callbacks: allow for one tick).
+    CHECK(waitUntil([&] { return out.status().grainsCommitted.load() >= grains + 10; }, 1s));
 
     CHECK(rig.reopens() == 1.0);
     CHECK(rig.reconnects() == 0.0);
