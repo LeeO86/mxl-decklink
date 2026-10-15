@@ -205,7 +205,10 @@ params = audio["transport_params"][0]
 assert params["mxl_domain_id"] == other, params
 assert params["mxl_flow_id"] == "c0ffee00-1111-4222-8333-444455556666", params
 assert video["master_enable"] is False, video
-print("restored", json.dumps(params))
+# IS-04 names the other end again too.
+subscription = get(f"/x-nmos/node/v1.3/receivers/{receiver('urn:x-nmos:format:audio')['id']}")["subscription"]
+assert subscription == {"sender_id": "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d", "active": True}, subscription
+print("restored", json.dumps(params), json.dumps(subscription))
 PY
 grep -q '"event":"nmos_connection_restored"' "$LOG" || fail "no nmos_connection_restored log"
 say "IS-05 routes restored after the restart"

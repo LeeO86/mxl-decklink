@@ -349,8 +349,10 @@ namespace
                     return; // the flow stays, no new grains: a source stall
                 }
                 auto const rate = _writer.grainRate();
-                auto const index = ::mxlGetCurrentIndex(&rate);
-                if (index != _last)
+                // `offset` grains behind the current time; a larger offset
+                // writes nothing until the time has caught up with it.
+                auto const index = ::mxlGetCurrentIndex(&rate) - offset.load();
+                if (index > _last)
                 {
                     _last = index;
                     (void)_writer.writeFrame(index, _frame.data(), _frame.size());
@@ -359,6 +361,7 @@ namespace
         {}
 
         std::atomic<bool> paused{false};
+        std::atomic<std::uint64_t> offset{0}; // source latency in grains
 
     private:
         mxlbridge::VideoWriter _writer;
@@ -367,12 +370,15 @@ namespace
         Pump _pump; // last: stops before the writer goes
     };
 
-    /// An audio writer that commits every sample up to the current TAI time.
+    /// An audio writer that commits every sample up to the current TAI time
+    /// less `lag` samples; with `block`, only whole blocks of that size.
     class AudioSource
     {
     public:
-        AudioSource(mxlbridge::Domain& domain, mxlbridge::AudioFlowParams const& p, std::int32_t value)
-            : _writer(domain, p, 1)
+        AudioSource(mxlbridge::Domain& domain, mxlbridge::AudioFlowParams const& p, std::int32_t value, std::uint64_t block = 0, std::uint64_t lag = 0)
+            : _block(block)
+            , _lag(lag)
+            , _writer(domain, p, 1)
             , _value(value)
             , _pump([this] {
                 if (paused)
@@ -381,14 +387,14 @@ namespace
                     return;
                 }
                 auto const rate = _writer.sampleRate();
-                auto const now = ::mxlGetCurrentIndex(&rate);
+                auto const now = ::mxlGetCurrentIndex(&rate) - _lag;
                 if (_last == 0)
                 {
                     _last = now - 4800;
                 }
-                while (_last < now)
+                while (_last + std::max<std::uint64_t>(_block, 1) <= now)
                 {
-                    auto const count = std::min<std::uint64_t>(now - _last, 480);
+                    auto const count = _block != 0 ? _block : std::min<std::uint64_t>(now - _last, 480);
                     _pcm.assign(static_cast<std::size_t>(count) * 2, _value);
                     int const map[] = {0, 1};
                     (void)_writer.writeSamples(_last + count, _pcm.data(), static_cast<std::size_t>(count), 2, map, config::AudioSampleType::Int32);
@@ -400,6 +406,8 @@ namespace
         std::atomic<bool> paused{false};
 
     private:
+        std::uint64_t _block;
+        std::uint64_t _lag;
         mxlbridge::AudioWriter _writer;
         std::int32_t _value;
         std::uint64_t _last = 0;
@@ -710,6 +718,104 @@ TEST_CASE("a source stall repeats the last frame and plays silence without a pre
     CHECK(out.status().reconnects.load() == 0);
     CHECK(rig.reopens() == 0.0);
 
+    out.stop();
+    audio.reset();
+    video.reset();
+}
+
+TEST_CASE("a source whose latency grows keeps playing: the read position slips behind it")
+{
+    // A mirror back from an origin restart with more buffering, or a card a
+    // few ppm fast: the grains come ever later. A read position that stayed
+    // ahead would repeat the last frame for good (the card is never late, so
+    // no preroll reset re-aligns), with the channel healthy.
+    Rig rig("late");
+    auto video = std::make_unique<VideoSource>(*rig.domain, rig.video, kGen1);
+    std::this_thread::sleep_for(200ms);
+
+    channel::OutputChannel out(rig.global, rig.ch, *rig.sub, *rig.domain, rig.metrics, "test");
+    out.start();
+    REQUIRE(waitUntil([&] { return out.status().state.load() == channel::State::Healthy; }, 3s));
+    REQUIRE(waitUntil([&] { return out.status().grainsCommitted.load() >= 10; }, 2s));
+
+    // One grain later every 300 ms, up to 4 grains (80 ms, beyond the 35 ms
+    // the card lets a read wait).
+    for (std::uint64_t offset = 1; offset <= 4; ++offset)
+    {
+        video->offset = offset;
+        std::this_thread::sleep_for(300ms);
+    }
+    std::this_thread::sleep_for(300ms);
+    auto const grains = out.status().grainsCommitted.load();
+    auto const repeats = out.status().framesRepeated.load();
+    std::this_thread::sleep_for(1000ms);
+    CHECK(out.status().grainsCommitted.load() - grains >= 40); // live frames, not a frozen one
+    CHECK(out.status().framesRepeated.load() - repeats <= 2);
+    CHECK(rig.counter("mxl_decklink_frames_repeated_total", "reason", "source_late") <= 16.0);
+    CHECK(out.status().state.load() == channel::State::Healthy);
+
+    // The latency shrinks again: the read position catches up with the source
+    // instead of lagging 4 grains behind it.
+    video->offset = 0;
+    std::this_thread::sleep_for(500ms);
+    out.housekeeping();
+    CHECK(rig.metrics.gauge("mxl_decklink_reader_lag_grains", "", rig.labels()).value() <= 3.0);
+    auto const after = out.status().grainsCommitted.load();
+    std::this_thread::sleep_for(500ms);
+    CHECK(out.status().grainsCommitted.load() - after >= 20);
+
+    CHECK(rig.played->lateFrames() <= 2);
+    CHECK(rig.counter("mxl_decklink_frames_dropped_total") == 0.0);
+    CHECK(rig.reconnects() == 0.0);
+    out.stop();
+    video.reset();
+}
+
+TEST_CASE("CHx_READ_OFFSET_GRAINS reads a lagging source behind its newest grain without repeats")
+{
+    // A mirrored source arrives 2 grains late (fabrics lag).
+    Rig rig("offset");
+    auto video = std::make_unique<VideoSource>(*rig.domain, rig.video, kGen1);
+    video->offset = 2;
+    std::this_thread::sleep_for(200ms);
+    rig.ch.readOffsetGrains = 2;
+
+    channel::OutputChannel out(rig.global, rig.ch, *rig.sub, *rig.domain, rig.metrics, "test");
+    out.start();
+    REQUIRE(waitUntil([&] { return out.status().state.load() == channel::State::Healthy; }, 3s));
+    std::this_thread::sleep_for(1000ms);
+    CHECK(out.status().grainsCommitted.load() >= 40);
+    CHECK(out.status().framesRepeated.load() == 0);
+    CHECK(rig.counter("mxl_decklink_source_stalls_total", "essence", "video") == 0.0);
+    out.housekeeping();
+    CHECK(rig.metrics.gauge("mxl_decklink_reader_lag_grains", "", rig.labels()).value() <= 3.0);
+    out.stop();
+    video.reset();
+}
+
+TEST_CASE("live audio written in whole frame blocks at the read position is not taken for stalled")
+{
+    // An audio writer that commits 20 ms blocks, the newest one right where
+    // the output reads: its head does not move during one short wait, but it
+    // moves every frame period. That is a live source, not a stall.
+    Rig rig("blocks");
+    rig.withAudio();
+    auto video = std::make_unique<VideoSource>(*rig.domain, rig.video, kGen1);
+    auto audio = std::make_unique<AudioSource>(*rig.domain, rig.audio, 0x10000000, 960, 2400);
+    std::this_thread::sleep_for(200ms);
+
+    channel::OutputChannel out(rig.global, rig.ch, *rig.sub, *rig.domain, rig.metrics, "test");
+    out.start();
+    REQUIRE(waitUntil([&] { return out.status().state.load() == channel::State::Healthy; }, 3s));
+    REQUIRE(waitUntil([&] { return rig.played->soundBlocks() >= 10; }, 2s));
+    auto const blocks = rig.played->blocks();
+    auto const sound = rig.played->soundBlocks();
+    std::this_thread::sleep_for(1500ms);
+    CHECK(rig.played->blocks() - blocks >= 50);
+    // Every block played has sound: none became silence.
+    CHECK(rig.played->blocks() - blocks == rig.played->soundBlocks() - sound);
+    CHECK(rig.counter("mxl_decklink_source_stalls_total", "essence", "audio") == 0.0);
+    CHECK(out.status().state.load() == channel::State::Healthy);
     out.stop();
     audio.reset();
     video.reset();

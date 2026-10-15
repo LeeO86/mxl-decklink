@@ -3,6 +3,7 @@
 // state/connections.json and applied again before the channels start.
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <map>
 #include <string>
 
@@ -132,6 +133,8 @@ TEST_CASE("route state file: saved activations load again, a broken file is igno
     CHECK_FALSE(off->flowId);
     CHECK_FALSE(off->peerId);
 
+    // A broken file is set aside as connections.json.bad, not overwritten by
+    // the next save with one route.
     {
         std::ofstream broken(path, std::ios::trunc);
         broken << "{ not json";
@@ -139,6 +142,26 @@ TEST_CASE("route state file: saved activations load again, a broken file is igno
     nmosroute::RouteState invalid(path);
     invalid.load();
     CHECK(invalid.all().empty());
+    CHECK_FALSE(fs::exists(path));
+    REQUIRE(fs::exists(path + ".bad"));
+    {
+        std::ifstream kept(path + ".bad");
+        std::string text((std::istreambuf_iterator<char>(kept)), std::istreambuf_iterator<char>());
+        CHECK(text == "{ not json");
+    }
+    nmosroute::SavedActivation one;
+    one.legId = "6a4c3e1e-8a43-5e8e-9b2f-0b1d2c3e4f52";
+    CHECK(invalid.save(one));
+    CHECK(fs::exists(path));
+    CHECK_FALSE(fs::exists(path + ".tmp"));
+
+    // So is an empty one.
+    fs::remove(path + ".bad");
+    { std::ofstream empty(path, std::ios::trunc); }
+    nmosroute::RouteState emptyState(path);
+    emptyState.load();
+    CHECK(emptyState.all().empty());
+    CHECK(fs::exists(path + ".bad"));
 }
 
 TEST_CASE("a restart restores the IS-05 routes of an output with video and audio from different domains")

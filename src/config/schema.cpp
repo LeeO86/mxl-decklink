@@ -128,6 +128,8 @@ namespace mxldl::config
                 {"COMMIT_BATCH_HINT", SettingKind::Channel, "int", {}, "", "maxCommitBatchSizeHint for the flow writers.", false},
                 {"OUTPUT_PREROLL_GRAINS", SettingKind::Channel, "int", {}, "3", "Output channels: grains buffered before playback start.", false},
                 {"READER_TIMEOUT_MS", SettingKind::Channel, "int", {}, "50", "Output channels: longest wait for a grain or audio block; never past the frames the card still holds (preroll - 1).", false},
+                {"READ_OFFSET_GRAINS", SettingKind::Channel, "int", {}, "0",
+                    "Output channels: read this many grains behind the newest grain (1-2 for mirrored sources with fabrics lag).", false},
                 {"LABEL", SettingKind::Channel, "string", {}, "", "Channel label for logs/metrics (defaults to ch<x>).", false},
             };
         }

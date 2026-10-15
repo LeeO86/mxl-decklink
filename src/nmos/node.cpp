@@ -375,6 +375,23 @@ namespace mxldl::nmosnode
             }
         }
 
+        /// §7.7: the IS-04 subscription of a restored leg names the other end
+        /// again: a Receiver's {sender_id, active}, a Sender's
+        /// {receiver_id, active}.
+        void restoreSubscription(nmos::resource& resource, nmosroute::Leg const& leg)
+        {
+            using web::json::value;
+            auto const it = restoredActive.find(leg.id);
+            if (it == restoredActive.end())
+            {
+                return;
+            }
+            auto const& saved = it->second;
+            auto& subscription = resource.data[U("subscription")];
+            subscription[U("active")] = value::boolean(saved.masterEnable);
+            subscription[leg.sender ? U("receiver_id") : U("sender_id")] = saved.peerId ? value::string(us(*saved.peerId)) : value::null();
+        }
+
         void buildResources(nmos::node_model& model)
         {
             using web::json::value;
@@ -459,6 +476,7 @@ namespace mxldl::nmosnode
 
                     auto sender = nmos::make_sender(us(leg.id), us(flowId), nmos::transports::mxl, us(deviceId), {}, {}, model.settings);
                     sender.data[U("subscription")][U("active")] = value::boolean(active);
+                    restoreSubscription(sender, leg);
                     setLabel(sender, ch->label + " " + role, "MXL sender");
                     tagGroup(sender, group, role);
                     insert(model, model.node_resources, std::move(sender));
@@ -533,6 +551,7 @@ namespace mxldl::nmosnode
                     setLabel(receiver, ch->label + " " + role, "MXL receiver");
                     tagGroup(receiver, group, role);
                     receiver.data[U("version")] = value::string(nmos::make_version());
+                    restoreSubscription(receiver, leg);
                     insert(model, model.node_resources, std::move(receiver));
 
                     // No enum of mxl_domain_id: a domain created after the start (a new production's output)

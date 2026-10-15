@@ -1,9 +1,14 @@
 // SPDX-License-Identifier: MIT
 #include "nmos/route_state.hpp"
 
+#include <cerrno>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+
+#include <fcntl.h>
+#include <unistd.h>
 
 #include <picojson/picojson.h>
 
@@ -39,6 +44,52 @@ namespace mxldl::nmosroute
                 }
             }
             return nullptr;
+        }
+
+        /// Writes `text` to `path` and flushes it to the disk. Empty on
+        /// success, else the error.
+        std::string writeDurably(std::string const& path, std::string const& text)
+        {
+            int const fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+            if (fd < 0)
+            {
+                return "cannot open " + path + ": " + std::strerror(errno);
+            }
+            std::size_t done = 0;
+            while (done < text.size())
+            {
+                auto const n = ::write(fd, text.data() + done, text.size() - done);
+                if (n < 0 && errno == EINTR)
+                {
+                    continue;
+                }
+                if (n <= 0)
+                {
+                    auto const err = std::string("cannot write ") + path + ": " + std::strerror(errno);
+                    ::close(fd);
+                    return err;
+                }
+                done += static_cast<std::size_t>(n);
+            }
+            if (::fsync(fd) != 0)
+            {
+                auto const err = std::string("fsync ") + path + ": " + std::strerror(errno);
+                ::close(fd);
+                return err;
+            }
+            ::close(fd);
+            return {};
+        }
+
+        /// The rename itself is durable only once its directory is synced.
+        void syncDirectory(std::filesystem::path const& dir)
+        {
+            int const fd = ::open(dir.empty() ? "." : dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+            if (fd >= 0)
+            {
+                (void)::fsync(fd);
+                ::close(fd);
+            }
         }
 
         Leg const* findLeg(std::vector<Leg> const& legs, std::string const& id)
@@ -84,18 +135,32 @@ namespace mxldl::nmosroute
         }
         std::stringstream text;
         text << in.rdbuf();
+        in.close();
+        // A broken file is kept for a look, not overwritten by the next save
+        // with one route.
+        auto const setAside = [this](std::string const& details) {
+            auto const bad = _path + ".bad";
+            std::error_code ec;
+            std::filesystem::rename(_path, bad, ec);
+            log::warn("route_state_invalid",
+                {
+                    {"path", _path},
+                    {"details", details},
+                    {"moved_to", ec ? std::string("(not moved: ") + ec.message() + ")" : bad},
+                });
+        };
         picojson::value root;
-        auto const err = picojson::parse(root, text.str());
+        auto const err = text.str().empty() ? std::string("empty file") : picojson::parse(root, text.str());
         if (!err.empty() || !root.is<picojson::object>())
         {
-            log::warn("route_state_invalid", {{"path", _path}, {"details", err.empty() ? std::string("not a JSON object") : err}});
+            setAside(err.empty() ? std::string("not a JSON object") : err);
             return;
         }
         auto const& top = root.get<picojson::object>();
         auto const resources = top.find("resources");
         if (resources == top.end() || !resources->second.is<picojson::object>())
         {
-            log::warn("route_state_invalid", {{"path", _path}, {"details", "no resources object"}});
+            setAside("no resources object");
             return;
         }
         for (auto const& [id, entry] : resources->second.get<picojson::object>())
@@ -182,16 +247,13 @@ namespace mxldl::nmosroute
         {
             std::filesystem::create_directories(dir, ec);
         }
+        // Atomic and durable: write and fsync a temp file, rename it over the
+        // file, fsync the directory.
         auto const tmp = _path + ".tmp";
+        if (auto const failed = writeDurably(tmp, text); !failed.empty())
         {
-            std::ofstream out(tmp, std::ios::trunc);
-            out << text;
-            out.flush();
-            if (!out)
-            {
-                log::error("route_state_write_failed", {{"path", _path}, {"details", "cannot write " + tmp + " (is the config volume writable?)"}});
-                return false;
-            }
+            log::error("route_state_write_failed", {{"path", _path}, {"details", failed + " (is the config volume writable?)"}});
+            return false;
         }
         std::filesystem::rename(tmp, _path, ec);
         if (ec)
@@ -199,6 +261,7 @@ namespace mxldl::nmosroute
             log::error("route_state_write_failed", {{"path", _path}, {"details", ec.message()}});
             return false;
         }
+        syncDirectory(dir);
         return true;
     }
 

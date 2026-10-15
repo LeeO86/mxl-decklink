@@ -469,6 +469,10 @@ namespace mxldl::config
             {
                 ch.readerTimeoutMs = parseInt(key("READER_TIMEOUT_MS"), *v, 1, 10000);
             }
+            if (auto const v = env.get(key("READ_OFFSET_GRAINS")))
+            {
+                ch.readOffsetGrains = parseInt(key("READ_OFFSET_GRAINS"), *v, 0, 64);
+            }
             if (auto const v = env.get(key("LABEL")))
             {
                 ch.label = *v;

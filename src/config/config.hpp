@@ -120,6 +120,9 @@ namespace mxldl::config
         int commitBatchHintAudio = 256;
         int outputPrerollGrains = 3;
         int readerTimeoutMs = 50;
+        /// Output channels: read this many grains behind the newest one
+        /// (mirrored sources arrive with 1–2 grains of fabrics lag, §2.4).
+        int readOffsetGrains = 0;
         std::string label; // defaulted to "ch<x>"
 
         [[nodiscard]] bool isAutoMode() const

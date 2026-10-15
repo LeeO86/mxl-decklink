@@ -61,7 +61,8 @@ namespace mxldl::channel
             /// channels play silence until samples come again.
             bool stalled = false;
             std::uint64_t stallHead = 0; // head index when the stall began
-            std::uint64_t headBefore = 0; // head index before the frame's sync wait
+            std::uint64_t lastHead = 0; // head index last seen
+            std::uint64_t headChangeNs = 0; // steady ns when lastHead last changed
             mxlFlowConfigInfo config{}; // at bring-up
         };
 
@@ -106,6 +107,11 @@ namespace mxldl::channel
         /// wrote nothing during the wait are stalled.
         void markStalledAudio();
         void updateStallClock();
+        /// Records when a reader's head index last changed.
+        static void noteHead(std::uint64_t head, std::uint64_t nowNs, std::uint64_t& lastHead, std::uint64_t& changedNs);
+        /// Grains to skip ahead after reading `grainIndex` with the source's
+        /// newest grain at `head` (0 = none; §2.4 read position).
+        [[nodiscard]] std::int64_t catchUp(std::uint64_t grainIndex, std::uint64_t head) const;
         /// Supervisor thread: logs stall start/end and keeps the channel
         /// `degraded` while a stall lasts longer than 1 s.
         void superviseStalls();
@@ -185,12 +191,18 @@ namespace mxldl::channel
         // the supervisor.
         bool _videoStalled = false;
         std::uint64_t _videoStallHead = 0; // head index when the stall began
+        std::uint64_t _videoLastHead = 0; // head index last seen
+        std::uint64_t _videoHeadChangeNs = 0; // steady ns when it last changed
+        std::uint64_t _periodNs = 20'000'000ULL; // frame period, set at bring-up
+        std::atomic<std::uint64_t> _lateSinceNs{0}; // steady ns of the first source_late in a row; 0 = none
+        bool _lateDegraded = false; // supervisor thread only
+        std::atomic<std::uint64_t> _stallRepeatsAtStart{0};
+        std::atomic<std::uint64_t> _lastStallRepeats{0}; // source_stall repeats of the last finished stall
         std::atomic<std::uint64_t> _stallSinceNs{0}; // steady ns; 0 = no reader stalled
         std::atomic<std::uint64_t> _stallEvents{0};
         std::atomic<std::uint64_t> _lastStallNs{0}; // duration of the last finished stall
         std::uint64_t _stallEventsLogged = 0; // supervisor thread only
         bool _stallLogged = false; // supervisor thread only
-        double _stallRepeatsAtStart = 0; // supervisor thread only
         bool _stallDegraded = false; // supervisor thread only
 
         ops::Counter* _framesTotal = nullptr;

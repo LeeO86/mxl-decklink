@@ -32,8 +32,10 @@ MXL v1.1 API rather than the spec's paraphrase of it).
   source stalls (its flow stays, no new grains), the output repeats the last
   frame and plays silence without a preroll reset, and is `degraded` after
   1 s (`mxl_decklink_frames_repeated_total{reason="source_stall"}`,
-  `mxl_decklink_source_stalls_total`, log `source_stall`). The preroll reset
-  is left to output-side trouble (frames the card shows late or drops).
+  `mxl_decklink_source_stalls_total`, log `source_stall`). A source that gets
+  later slips the read position instead of freezing; `CHx_READ_OFFSET_GRAINS`
+  reads mirrored sources behind their newest grain. The preroll reset is left
+  to output-side trouble (frames the card shows late or drops).
 - **Ops + web control** (spec §7.1 / §7.5): one consolidated HTTP port
   `WEB_PORT` (default 8080) serves `/livez`, `/readyz`, `/statusz`, Prometheus
   `/metrics`, and — when `WEB_ENABLE=true` — the embedded Vue SPA + REST API
