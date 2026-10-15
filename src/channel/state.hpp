@@ -45,6 +45,8 @@ namespace mxldl::channel
         /// Outputs: frames that repeated the last frame because no new grain
         /// could be read (source stall, flow re-open, read error).
         std::atomic<std::uint64_t> framesRepeated{0};
+        /// Outputs: CHx_READ_OFFSET_GRAINS in effect (capped at bring-up).
+        std::atomic<int> readOffsetGrains{0};
         std::atomic<std::uint64_t> reconnects{0};
         std::atomic<std::uint64_t> grainsCommitted{0};
         /// Output only: DeckLink `GetBufferedAudioSampleFrameCount` (sample

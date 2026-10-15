@@ -15,6 +15,7 @@ namespace mxldl::log
         std::atomic<Level> g_level{Level::Info};
         std::atomic<Format> g_format{Format::Json};
         std::mutex g_writeMutex;
+        std::function<void(std::string const&)> g_sink; // tests, under g_writeMutex
 
         char const* levelName(Level l)
         {
@@ -177,6 +178,16 @@ namespace mxldl::log
         std::lock_guard const lock{g_writeMutex};
         ::fwrite(line.data(), 1, line.size(), stderr);
         ::fflush(stderr);
+        if (g_sink)
+        {
+            g_sink(line);
+        }
+    }
+
+    void setSink(std::function<void(std::string const& line)> sink)
+    {
+        std::lock_guard const lock{g_writeMutex};
+        g_sink = std::move(sink);
     }
 
     void trace(std::string_view event, std::initializer_list<Field> fields)

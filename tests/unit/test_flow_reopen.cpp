@@ -27,6 +27,7 @@
 #include "mxlbridge/domain.hpp"
 #include "mxlbridge/videowriter.hpp"
 #include "ops/metrics.hpp"
+#include "util/logging.hpp"
 
 using namespace mxldl;
 namespace fs = std::filesystem;
@@ -420,6 +421,23 @@ namespace
                 {
                     return; // the flow stays, no new grains: a source stall
                 }
+                if (auto const step = stepMs.load(); step > 0)
+                {
+                    // A source slower than real time: the next grain every
+                    // `step` ms, whatever the time says.
+                    auto const t = std::chrono::steady_clock::now();
+                    if (t >= _nextStep)
+                    {
+                        _nextStep = t + std::chrono::milliseconds(step);
+                        ++_last;
+                        if (_frame.size() >= kStampAt + sizeof _last)
+                        {
+                            std::memcpy(_frame.data() + kStampAt, &_last, sizeof _last);
+                        }
+                        (void)_writer.writeFrame(_last, _frame.data(), _frame.size());
+                    }
+                    return;
+                }
                 auto const rate = _writer.grainRate();
                 // `offset` grains behind the current time; a larger offset
                 // writes nothing until the time has caught up with it.
@@ -438,11 +456,13 @@ namespace
 
         std::atomic<bool> paused{false};
         std::atomic<std::uint64_t> offset{0}; // source latency in grains
+        std::atomic<int> stepMs{0}; // > 0: one grain every stepMs, slower than real time
 
     private:
         mxlbridge::VideoWriter _writer;
         std::vector<std::uint8_t> _frame;
         std::uint64_t _last = 0;
+        std::chrono::steady_clock::time_point _nextStep{};
         Pump _pump; // last: stops before the writer goes
     };
 
@@ -602,6 +622,43 @@ namespace
                 {"subdevice_index", "0"},
             };
         }
+    };
+
+    /// Collects the log lines written while it lives.
+    class LogCapture
+    {
+    public:
+        LogCapture()
+        {
+            log::setSink([this](std::string const& line) {
+                std::lock_guard const lock{_mutex};
+                _lines.push_back(line);
+            });
+        }
+
+        ~LogCapture()
+        {
+            log::setSink({});
+        }
+
+        /// Lines of event `name`.
+        std::vector<std::string> of(std::string const& name)
+        {
+            std::lock_guard const lock{_mutex};
+            std::vector<std::string> out;
+            for (auto const& line : _lines)
+            {
+                if (line.find("\"event\":\"" + name + "\"") != std::string::npos)
+                {
+                    out.push_back(line);
+                }
+            }
+            return out;
+        }
+
+    private:
+        std::mutex _mutex;
+        std::vector<std::string> _lines;
     };
 
     bool waitUntil(std::function<bool()> const& done, std::chrono::milliseconds limit)
@@ -961,9 +1018,18 @@ TEST_CASE("CHx_READ_OFFSET_GRAINS beyond the flows' history is capped")
     std::this_thread::sleep_for(300ms);
     rig.ch.readOffsetGrains = 64;
 
+    LogCapture logs;
     channel::OutputChannel out(rig.global, rig.ch, *rig.sub, *rig.domain, rig.metrics, "test");
     out.start();
     REQUIRE(waitUntil([&] { return out.status().state.load() == channel::State::Healthy; }, 3s));
+    // Visible: /api/status, the gauge and the log of every bring-up.
+    CHECK(out.status().readOffsetGrains.load() == 4);
+    CHECK(rig.metrics.gauge("mxl_decklink_read_offset_grains", "", rig.labels()).value() == 4.0);
+    auto const applied = logs.of("read_offset_applied");
+    REQUIRE(applied.size() == 1);
+    CHECK(applied[0].find("\"requested\":64") != std::string::npos);
+    CHECK(applied[0].find("\"effective\":4") != std::string::npos);
+    CHECK(logs.of("read_offset_capped").size() == 1);
     auto const grains = out.status().grainsCommitted.load();
     auto const sound = rig.played->soundBlocks();
     std::this_thread::sleep_for(1000ms);
@@ -977,5 +1043,85 @@ TEST_CASE("CHx_READ_OFFSET_GRAINS beyond the flows' history is capped")
     CHECK(lag <= 9.0);
     out.stop();
     audio.reset();
+    video.reset();
+}
+
+TEST_CASE("an output comes up at once on a new source that is two grains late (a mirror created by the route)")
+{
+    // The preroll used to ask for grains the new mirror never had: the
+    // bring-up failed (preroll_grain_unavailable) and retried for 1.6 s.
+    for (int readOffset : {0, 2})
+    {
+        CAPTURE(readOffset);
+        Rig rig(readOffset == 0 ? "fresh0" : "fresh2");
+        rig.withAudio();
+        rig.ch.readOffsetGrains = readOffset;
+        LogCapture logs;
+        auto video = std::make_unique<VideoSource>(*rig.domain, rig.video, kGen1);
+        video->offset = 2;
+        auto audio = std::make_unique<AudioSource>(*rig.domain, rig.audio, 0x10000000);
+        std::this_thread::sleep_for(5ms);
+
+        channel::OutputChannel out(rig.global, rig.ch, *rig.sub, *rig.domain, rig.metrics, "test");
+        auto const started = std::chrono::steady_clock::now();
+        out.start();
+        REQUIRE(waitUntil([&] { return out.status().state.load() == channel::State::Healthy; }, 3s));
+        CHECK(std::chrono::steady_clock::now() - started < 400ms);
+        CHECK(logs.of("preroll_grain_unavailable").empty());
+        CHECK(logs.of("channel_bringup_failed").empty());
+        CHECK(rig.reconnects() == 0.0);
+        CHECK(out.status().readOffsetGrains.load() == readOffset);
+        auto const grains = out.status().grainsCommitted.load();
+        std::this_thread::sleep_for(500ms);
+        CHECK(out.status().grainsCommitted.load() - grains >= 20);
+        CHECK(rig.played->soundBlocks() >= 20);
+        out.stop();
+        audio.reset();
+        video.reset();
+    }
+}
+
+TEST_CASE("short stalls, late runs and catch-ups are logged")
+{
+    Rig rig("logs");
+    LogCapture logs;
+    auto video = std::make_unique<VideoSource>(*rig.domain, rig.video, kGen1);
+    std::this_thread::sleep_for(200ms);
+    channel::OutputChannel out(rig.global, rig.ch, *rig.sub, *rig.domain, rig.metrics, "test");
+    out.start();
+    REQUIRE(waitUntil([&] { return out.status().state.load() == channel::State::Healthy; }, 3s));
+    REQUIRE(waitUntil([&] { return out.status().grainsCommitted.load() >= 10; }, 2s));
+
+    // A 150 ms stall: below the 200 ms of the source_stall warning, but its
+    // end is logged with the frames it repeated.
+    video->paused = true;
+    std::this_thread::sleep_for(150ms);
+    video->paused = false;
+    REQUIRE(waitUntil([&] { return !logs.of("source_stall_ended").empty(); }, 2s));
+    auto const ended = logs.of("source_stall_ended")[0];
+    CHECK(ended.find("\"stalls\":1") != std::string::npos);
+    CHECK(ended.find("\"frames_repeated\":0") == std::string::npos);
+    CHECK(rig.counter("mxl_decklink_frames_repeated_total", "reason", "source_stall") >= 3.0);
+
+    // A source slower than real time (one grain every 30 ms) is late frame
+    // after frame: the run is logged when it starts and when it ends.
+    video->stepMs = 30;
+    REQUIRE(waitUntil([&] { return !logs.of("source_late").empty(); }, 2s));
+    CHECK(logs.of("source_late")[0].find("slip") != std::string::npos);
+    std::this_thread::sleep_for(400ms);
+    // Back to real time, ahead of the slipped read position: the run ends,
+    // and a second later the read position catches up.
+    video->stepMs = 0;
+    REQUIRE(waitUntil([&] { return !logs.of("source_late_ended").empty(); }, 2s));
+    REQUIRE(waitUntil([&] { return !logs.of("read_position_caught_up").empty(); }, 3s));
+    CHECK(logs.of("read_position_caught_up")[0].find("skipped_grains") != std::string::npos);
+    // After the stall and after the jump the output went straight to the
+    // source's newest grain: no gap grain was read, nothing shown late.
+    CHECK(logs.of("grain_read_error").empty());
+    CHECK(rig.counter("mxl_decklink_frames_repeated_total", "reason", "read_error") == 0.0);
+    CHECK(logs.of("output_frames_lost").empty());
+    CHECK(rig.played->lateFrames() <= 1);
+    CHECK(rig.reconnects() == 0.0);
+    out.stop();
     video.reset();
 }
