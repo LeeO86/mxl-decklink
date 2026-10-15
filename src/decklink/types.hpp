@@ -96,6 +96,9 @@ namespace mxldl::dl
         std::optional<bool> supportsSmpteLevelA; // BMDDeckLinkSupportsSMPTELevelAOutput
         std::optional<bool> output1080pAsPsF; // bmdDeckLinkConfigOutput1080pAsPsF
         std::optional<std::string> linkConfiguration; // bmdDeckLinkConfigSDIOutputLinkConfiguration: single, dual, quad
+        /// CHx_SDI_LEVEL of the output channel (set by the channel, not read
+        /// from the card): A, B or driver.
+        std::optional<std::string> requestedLevel;
 
         bool operator==(SdiOutputConfig const&) const = default;
     };
@@ -117,9 +120,23 @@ namespace mxldl::dl
         out += ",\"supports_smpte_level_a\":" + flag(c.supportsSmpteLevelA);
         out += ",\"output_1080p_as_psf\":" + flag(c.output1080pAsPsF);
         out += ",\"link_configuration\":" + (c.linkConfiguration ? "\"" + *c.linkConfiguration + "\"" : std::string("null"));
+        if (c.requestedLevel)
+        {
+            out += ",\"requested_level\":\"" + *c.requestedLevel + "\"";
+        }
         out += "}";
         return out;
     }
+
+    /// What setting the SDI level did (§7.1 CHx_SDI_LEVEL).
+    struct SdiLevelResult
+    {
+        bool applied = false; // the card took the requested level
+        bool fallback = false; // not supported: the driver's setting stays
+        bool linkChanged = false; // the SDI output link configuration was set to single link
+        bool partial = false; // the level was set, the single link was refused
+        std::string details;
+    };
 
     /// Live per-sub-device status from the DeckLink SDK (§7.5 Card tab).
     struct SubDeviceStatus

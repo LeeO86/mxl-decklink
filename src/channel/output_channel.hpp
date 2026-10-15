@@ -73,7 +73,8 @@ namespace mxldl::channel
             SourceStall, // the source stopped writing; the flow is still there
             SourceLate, // the source writes, but its grain came too late for the card
             FlowReopen, // the flow was re-created; its reader is being re-opened
-            ReadError, // an invalid grain or another read error
+            SourceInvalid, // the source marked the grain invalid (a gap grain)
+            ReadError, // another read error
         };
 
         void supervisorLoop();
@@ -99,6 +100,9 @@ namespace mxldl::channel
         /// for the same flow ids.
         void reopenInvalidReaders();
         void waitForWork(std::chrono::milliseconds timeout);
+        /// Supervisor: logs once per bring-up how the card's playback clock
+        /// steps (stream_time_granularity).
+        void probeStreamTime();
 
         // Source stalls (§2.4). Called with _callbackMutex held.
         void setVideoStalled(bool stalled);
@@ -170,6 +174,9 @@ namespace mxldl::channel
         std::uint64_t _nextGrainIndex = 0;
         std::uint64_t _scheduledFrames = 0;
         std::uint64_t _frameWaitNs = 0; // longest read wait in a completion callback
+        std::uint64_t _scheduleMarginNs = 8'000'000ULL; // a frame is scheduled at least this long before it is shown
+        bool _streamProbed = false; // supervisor thread only
+        std::atomic<bool> _streamWholeFrames{false}; // the playback clock steps in whole frames
         // Read deadline of the completion callbacks (§2.4), _callbackMutex.
         std::uint64_t _lastCompletionNs = 0; // steady ns, estimated
         std::uint64_t _lastCallbackEndNs = 0; // when the previous completion callback returned
@@ -226,6 +233,9 @@ namespace mxldl::channel
         std::atomic<std::uint64_t> _catchUpGrains{0};
         std::atomic<bool> _lastCatchUpOutOfRing{false};
         std::atomic<std::uint64_t> _readErrors{0};
+        std::atomic<std::uint64_t> _invalidGrains{0};
+        std::uint64_t _invalidGrainsLogged = 0; // supervisor thread only
+        std::uint64_t _invalidLogNs = 0;
         std::atomic<int> _lastReadError{0};
         std::atomic<std::uint64_t> _cardLate{0};
         std::atomic<std::uint64_t> _cardDropped{0};
@@ -254,6 +264,7 @@ namespace mxldl::channel
         ops::Counter* _repeatedSourceStall = nullptr;
         ops::Counter* _repeatedSourceLate = nullptr;
         ops::Counter* _repeatedFlowReopen = nullptr;
+        ops::Counter* _repeatedSourceInvalid = nullptr;
         ops::Counter* _repeatedReadError = nullptr;
         ops::Counter* _stallsVideo = nullptr;
         ops::Counter* _stallsAudio = nullptr;

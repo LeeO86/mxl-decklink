@@ -597,6 +597,18 @@ namespace mxldl::dl
                 return n;
             }
 
+            std::optional<std::uint64_t> streamTimeNs() override
+            {
+                // Microseconds keep BMDTimeValue far from overflow.
+                BMDTimeValue t = 0;
+                double speed = 0.0;
+                if (_output->GetScheduledStreamTime(1'000'000, &t, &speed) != S_OK || speed <= 0.0 || t < 0)
+                {
+                    return std::nullopt;
+                }
+                return static_cast<std::uint64_t>(t) * 1000ULL;
+            }
+
             std::uint32_t bufferedAudioFrames() override
             {
                 uint32_t n = 0;
@@ -771,6 +783,67 @@ namespace mxldl::dl
                        supported;
             }
 
+            SdiLevelResult setSdiOutputLevel(config::SdiLevel level, config::VideoMode const& mode) override
+            {
+                SdiLevelResult r;
+                if (level == config::SdiLevel::Driver)
+                {
+                    r.details = "CHx_SDI_LEVEL=driver: the driver's setting stays";
+                    return r;
+                }
+                auto config = _device.queryInterface<IDeckLinkConfiguration>(IID_IDeckLinkConfiguration);
+                if (!config)
+                {
+                    r.fallback = true;
+                    r.details = "the card has no IDeckLinkConfiguration; the driver's setting stays";
+                    return r;
+                }
+                _sdiConfig = config; // kept until releaseSdiOutputLevel()
+                if (level == config::SdiLevel::A)
+                {
+                    bool supports = false;
+                    auto attrs = _device.queryInterface<IDeckLinkProfileAttributes>(IID_IDeckLinkProfileAttributes);
+                    if (!attrs || attrs->GetFlag(BMDDeckLinkSupportsSMPTELevelAOutput, &supports) != S_OK || !supports)
+                    {
+                        r.fallback = true;
+                        r.details = "the card does not support SMPTE Level A output (BMDDeckLinkSupportsSMPTELevelAOutput); the driver's setting stays";
+                        return r;
+                    }
+                }
+                if (auto const hr = config->SetFlag(bmdDeckLinkConfigSMPTELevelAOutput, level == config::SdiLevel::A); hr != S_OK)
+                {
+                    r.fallback = true;
+                    r.details = hresultMessage("SetFlag(bmdDeckLinkConfigSMPTELevelAOutput)", hr);
+                    return r;
+                }
+                r.applied = true;
+                // Level A is a single 3G link. An HD mode on a dual-link
+                // output configuration goes out as two 1.5G links (Level
+                // B-DL style), which receivers show as interlaced.
+                if (level == config::SdiLevel::A && mode.height <= 1080)
+                {
+                    int64_t link = 0;
+                    if (config->GetInt(bmdDeckLinkConfigSDIOutputLinkConfiguration, &link) == S_OK && link != bmdLinkConfigurationSingleLink)
+                    {
+                        if (auto const hr = config->SetInt(bmdDeckLinkConfigSDIOutputLinkConfiguration, bmdLinkConfigurationSingleLink); hr == S_OK)
+                        {
+                            r.linkChanged = true;
+                        }
+                        else
+                        {
+                            r.partial = true;
+                            r.details = hresultMessage("SetInt(bmdDeckLinkConfigSDIOutputLinkConfiguration, single link)", hr);
+                        }
+                    }
+                }
+                return r;
+            }
+
+            void releaseSdiOutputLevel() override
+            {
+                _sdiConfig = ComPtr<IDeckLinkConfiguration>();
+            }
+
             SubDeviceStatus status() override
             {
                 SubDeviceStatus s;
@@ -886,6 +959,10 @@ namespace mxldl::dl
         private:
             ComPtr<IDeckLink> _device;
             SubDeviceInfo _info;
+            /// Held while the output plays: the SDK may drop configuration
+            /// changes when the last reference to the interface goes. Not
+            /// written to the preferences (that would apply to every app).
+            ComPtr<IDeckLinkConfiguration> _sdiConfig;
         };
 
         class SdkCard final

@@ -143,6 +143,10 @@ namespace mxldl::dl
             std::atomic<std::uint32_t> currentModeBmd{0};
             std::atomic<bool> capturing{false};
             std::atomic<bool> playing{false};
+            // SDI output signalling: the driver default of the card on small
+            // (Level B, dual link) until a channel sets it.
+            std::atomic<bool> levelA{false};
+            std::atomic<bool> singleLink{false};
         };
 
         // ------------------------------------------------------------------
@@ -595,12 +599,28 @@ namespace mxldl::dl
                 s.pcieLinkWidth = 8;
                 s.pcieLinkSpeed = 3;
                 s.temperatureC = 42.0;
-                // A card left at the driver default: 3G-SDI Level B.
-                s.sdiOutput.smpteLevelA = false;
+                s.sdiOutput.smpteLevelA = _shared->levelA.load();
                 s.sdiOutput.supportsSmpteLevelA = true;
                 s.sdiOutput.output1080pAsPsF = false;
-                s.sdiOutput.linkConfiguration = "single";
+                s.sdiOutput.linkConfiguration = _shared->singleLink.load() ? "single" : "dual";
                 return s;
+            }
+
+            SdiLevelResult setSdiOutputLevel(config::SdiLevel level, config::VideoMode const& mode) override
+            {
+                SdiLevelResult r;
+                if (level == config::SdiLevel::Driver)
+                {
+                    r.details = "CHx_SDI_LEVEL=driver: the driver's setting stays";
+                    return r;
+                }
+                _shared->levelA.store(level == config::SdiLevel::A);
+                r.applied = true;
+                if (level == config::SdiLevel::A && mode.height <= 1080 && !_shared->singleLink.exchange(true))
+                {
+                    r.linkChanged = true;
+                }
+                return r;
             }
 
             std::unique_ptr<ICaptureSession> openCapture() override

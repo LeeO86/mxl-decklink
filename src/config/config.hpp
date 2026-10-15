@@ -42,6 +42,16 @@ namespace mxldl::config
         Int32,
     };
 
+    /// CHx_SDI_LEVEL: how an output signals 3G-SDI (§7.1).
+    enum class SdiLevel
+    {
+        A, // SMPTE Level A, single link for HD modes
+        B, // SMPTE Level B
+        Driver, // leave the driver's setting alone
+    };
+
+    char const* sdiLevelName(SdiLevel level);
+
     enum class TimestampSourceCfg
     {
         Hardware,
@@ -123,6 +133,8 @@ namespace mxldl::config
         /// Output channels: read this many grains behind the newest one
         /// (mirrored sources arrive with 1–2 grains of fabrics lag, §2.4).
         int readOffsetGrains = 0;
+        /// Output channels: 3G-SDI level set before the output is enabled.
+        SdiLevel sdiLevel = SdiLevel::A;
         std::string label; // defaulted to "ch<x>"
 
         [[nodiscard]] bool isAutoMode() const

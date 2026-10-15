@@ -31,7 +31,7 @@ namespace mxldl::channel
 
         // §2.4: a read in the completion callback leaves the card at least
         // this much (or a quarter frame) before the frame is due.
-        constexpr std::uint64_t kScheduleMarginNs = 4'000'000ULL;
+        constexpr std::uint64_t kScheduleMarginNs = 8'000'000ULL;
         // A completion call that comes within this of the previous callback's
         // return was queued behind it.
         constexpr std::uint64_t kHeldUpNs = 1'000'000ULL;
@@ -54,6 +54,9 @@ namespace mxldl::channel
         constexpr std::uint64_t kCatchUpAfterNs = 1'000'000'000ULL;
         // §2.4: a source late for this long marks the channel degraded.
         constexpr std::uint64_t kLateDegradedNs = 1'000'000'000ULL;
+        // How long a preroll waits for the first grain of a flow that has
+        // none yet (an idle mirror the route woke up).
+        constexpr std::uint64_t kFirstGrainWaitNs = 1'000'000'000ULL;
         // A late run is logged once it has this many frames in a row.
         constexpr std::uint64_t kLateRunLog = 3;
         // Late repeats less than this apart belong to one run (a source
@@ -136,6 +139,7 @@ namespace mxldl::channel
         _repeatedSourceStall = &metrics.counter("mxl_decklink_frames_repeated_total", repeatedHelp, withLabel("reason", "source_stall"));
         _repeatedSourceLate = &metrics.counter("mxl_decklink_frames_repeated_total", repeatedHelp, withLabel("reason", "source_late"));
         _repeatedFlowReopen = &metrics.counter("mxl_decklink_frames_repeated_total", repeatedHelp, withLabel("reason", "flow_reopen"));
+        _repeatedSourceInvalid = &metrics.counter("mxl_decklink_frames_repeated_total", repeatedHelp, withLabel("reason", "source_invalid"));
         _repeatedReadError = &metrics.counter("mxl_decklink_frames_repeated_total", repeatedHelp, withLabel("reason", "read_error"));
         char const* const stallsHelp = "Output source stalls: an MXL flow stopped getting new grains or samples";
         _stallsVideo = &metrics.counter("mxl_decklink_source_stalls_total", stallsHelp, withLabel("essence", "video"));
@@ -263,9 +267,67 @@ namespace mxldl::channel
             }
 
             reopenInvalidReaders();
+            if (_streamingUp.load() && !_streamProbed)
+            {
+                probeStreamTime();
+            }
             superviseStalls();
             waitForWork(std::chrono::milliseconds(100));
         }
+    }
+
+    void OutputChannel::probeStreamTime()
+    {
+        // Once per bring-up: how fine the card's playback clock is
+        // (GetScheduledStreamTime). Sampled for 1.5 frames on the supervisor
+        // thread, which owns _playback.
+        _streamProbed = true;
+        if (!_playback)
+        {
+            return;
+        }
+        std::vector<std::uint64_t> values;
+        auto const until = steadyNowNs() + _periodNs * 3 / 2;
+        while (steadyNowNs() < until)
+        {
+            if (auto const t = _playback->streamTimeNs())
+            {
+                if (values.empty() || values.back() != *t)
+                {
+                    values.push_back(*t);
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::microseconds(500));
+        }
+        if (values.empty())
+        {
+            log::info("stream_time_granularity",
+                {{"channel_index", _cfg.index}, {"channel_label", _cfg.label}, {"granularity", "unknown"}, {"details", "the card reports no playback position; the read deadline is estimated from the completion calls"}});
+            return;
+        }
+        std::uint64_t step = 0;
+        for (std::size_t i = 1; i < values.size(); ++i)
+        {
+            if (values[i] > values[i - 1])
+            {
+                auto const d = values[i] - values[i - 1];
+                step = step == 0 ? d : std::min(step, d);
+            }
+        }
+        // Whole frames: at most a couple of distinct values in 1.5 frames,
+        // a frame apart.
+        bool const whole = values.size() <= 3 && (step == 0 || step * 10 >= _periodNs * 9);
+        _streamWholeFrames.store(whole);
+        log::info("stream_time_granularity",
+            {
+                {"channel_index", _cfg.index},
+                {"channel_label", _cfg.label},
+                {"granularity", whole ? "whole_frames" : "sub_frame"},
+                {"step_us", step / 1000},
+                {"distinct_values", static_cast<std::uint64_t>(values.size())},
+                {"frame_us", _periodNs / 1000},
+                {"margin_us", _scheduleMarginNs / 1000},
+            });
     }
 
     void OutputChannel::waitForWork(std::chrono::milliseconds timeout)
@@ -291,6 +353,8 @@ namespace mxldl::channel
         }
         _videoLastHead = 0;
         _videoHeadChangeNs = 0;
+        _streamProbed = false;
+        _streamWholeFrames.store(false);
         _lateDegraded = false;
         _behindSinceNs = 0;
         _lateRunCount.store(0);
@@ -382,6 +446,42 @@ namespace mxldl::channel
                 _playing.store(false);
             };
 
+            // CHx_SDI_LEVEL before the output is enabled (§7.1).
+            {
+                auto const level = _subDevice.setSdiOutputLevel(_cfg.sdiLevel, _mode);
+                if (level.partial)
+                {
+                    log::warn("sdi_level_partial",
+                        {
+                            {"channel_index", _cfg.index},
+                            {"channel_label", _cfg.label},
+                            {"requested", config::sdiLevelName(_cfg.sdiLevel)},
+                            {"details", level.details},
+                        });
+                }
+                else if (level.fallback)
+                {
+                    log::warn("sdi_level_not_set",
+                        {
+                            {"channel_index", _cfg.index},
+                            {"channel_label", _cfg.label},
+                            {"requested", config::sdiLevelName(_cfg.sdiLevel)},
+                            {"details", level.details},
+                        });
+                }
+                else if (level.applied)
+                {
+                    log::info("sdi_level_set",
+                        {
+                            {"channel_index", _cfg.index},
+                            {"channel_label", _cfg.label},
+                            {"requested", config::sdiLevelName(_cfg.sdiLevel)},
+                            {"link_set_to_single", level.linkChanged},
+                            {"details", level.details},
+                        });
+                }
+            }
+
             if (auto const err = _playback->enable(params, std::move(callbacks)))
             {
                 log::error("playback_enable_failed", {{"channel_index", _cfg.index}, {"details", *err}});
@@ -389,10 +489,11 @@ namespace mxldl::channel
                 return false;
             }
 
-            // How the card signals the SDI output (read only; set by the
-            // driver's preferences, not by this process).
+            // How the card signals the SDI output, read back after
+            // CHx_SDI_LEVEL (the effective values).
             {
-                auto const sdi = _subDevice.status().sdiOutput;
+                auto sdi = _subDevice.status().sdiOutput;
+                sdi.requestedLevel = config::sdiLevelName(_cfg.sdiLevel);
                 _status.setSdiOutput(sdi);
                 log::info("sdi_output_config",
                     {
@@ -403,6 +504,7 @@ namespace mxldl::channel
                         {"supports_smpte_level_a", sdi.supportsSmpteLevelA ? (*sdi.supportsSmpteLevelA ? "true" : "false") : "unknown"},
                         {"output_1080p_as_psf", sdi.output1080pAsPsF ? (*sdi.output1080pAsPsF ? "true" : "false") : "unknown"},
                         {"link_configuration", sdi.linkConfiguration.value_or("unknown")},
+                        {"requested_level", *sdi.requestedLevel},
                     });
             }
 
@@ -414,7 +516,8 @@ namespace mxldl::channel
             {
                 auto const periodNs = 1'000'000'000ULL * static_cast<std::uint64_t>(_mode.rateDenominator) / static_cast<std::uint64_t>(_mode.rateNumerator);
                 _periodNs = periodNs;
-                auto const marginNs = std::max<std::uint64_t>(kScheduleMarginNs, periodNs / 4);
+                auto const marginNs = std::max<std::uint64_t>(kScheduleMarginNs, periodNs / 3);
+                _scheduleMarginNs = marginNs;
                 auto const ahead = static_cast<std::uint64_t>(_cfg.outputPrerollGrains > 1 ? _cfg.outputPrerollGrains - 1 : 0) * periodNs;
                 _frameWaitNs = std::min<std::uint64_t>(ahead > marginNs ? ahead - marginNs : 0, static_cast<std::uint64_t>(_cfg.readerTimeoutMs) * 1'000'000ULL);
             }
@@ -435,7 +538,46 @@ namespace mxldl::channel
             // created by this route has no history yet: start no later than
             // its newest grain allows (the preroll grains end at head -
             // offset).
-            auto const sourceHead = _videoReader->headIndex();
+            auto sourceHead = _videoReader->headIndex();
+            if (sourceHead == 0)
+            {
+                // The flow exists but has no grain yet (an idle mirror the
+                // route just woke up): wait for the first one instead of
+                // guessing a position and failing the bring-up.
+                auto const until = steadyNowNs() + kFirstGrainWaitNs;
+                while (sourceHead == 0 && _running.load() && steadyNowNs() < until)
+                {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                    sourceHead = _videoReader->headIndex();
+                }
+                if (sourceHead == 0)
+                {
+                    log::warn("preroll_no_grain_yet",
+                        {
+                            {"channel_index", _cfg.index},
+                            {"channel_label", _cfg.label},
+                            {"waited_ms", kFirstGrainWaitNs / 1'000'000ULL},
+                            {"details", "the source flow has no grain yet"},
+                        });
+                    tearDownStreaming();
+                    return false;
+                }
+                // Let the source write the preroll's grains and the read
+                // offset past its first one (first + offset + preroll), so
+                // the preroll starts at a grain the source has, shows only
+                // grains it has, and the offset is there from the start
+                // instead of building up through late repeats (slips).
+                auto const first = sourceHead;
+                auto const need = first + static_cast<std::uint64_t>(_readOffset) + preroll;
+                auto const offsetUntil = steadyNowNs() + (need - first + 3) * _periodNs;
+                while (sourceHead < need && _running.load() && steadyNowNs() < offsetUntil)
+                {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                    sourceHead = _videoReader->headIndex();
+                }
+                auto const now = ::mxlGetCurrentIndex(&rate);
+                start = now > behind ? now - behind : 0;
+            }
             if (sourceHead != 0 && sourceHead + 1 < start + behind)
             {
                 start = sourceHead + 1 > behind ? sourceHead + 1 - behind : 0;
@@ -589,6 +731,7 @@ namespace mxldl::channel
         playback.reset();
         videoReader.reset();
         audioFlows.clear();
+        _subDevice.releaseSdiOutputLevel();
     }
 
     bool OutputChannel::scheduleGrain(std::uint64_t grainIndex, std::uint64_t waitNs)
@@ -675,7 +818,9 @@ namespace mxldl::channel
                     }
                     if (status == MXL_STATUS_OK)
                     {
-                        reason = RepeatReason::ReadError; // when the grain is marked invalid
+                        // When the grain is marked invalid: its writer says
+                        // there is no picture for it (a gap grain).
+                        reason = RepeatReason::SourceInvalid;
                         bool const wasStalled = _videoStalled;
                         setVideoStalled(false);
                         _lateSinceNs.store(0);
@@ -831,6 +976,10 @@ namespace mxldl::channel
                 case RepeatReason::SourceStall: _repeatedSourceStall->inc(); break;
                 case RepeatReason::SourceLate: _repeatedSourceLate->inc(); break;
                 case RepeatReason::FlowReopen: _repeatedFlowReopen->inc(); break;
+                case RepeatReason::SourceInvalid:
+                    _repeatedSourceInvalid->inc();
+                    _invalidGrains.fetch_add(1);
+                    break;
                 case RepeatReason::ReadError:
                     _repeatedReadError->inc();
                     _readErrors.fetch_add(1);
@@ -905,6 +1054,25 @@ namespace mxldl::channel
         }
         _lastCompletionNs = completedNs;
         _readDeadlineNs = completedNs + _frameWaitNs;
+        if (auto const stream = _playback ? _playback->streamTimeNs() : std::nullopt)
+        {
+            // Exact, from the card's own clock: the frame scheduled now is
+            // shown at _scheduledFrames frame durations. Whatever held the
+            // calls up (a delivery delay, queued callbacks, clock drift),
+            // reads end that margin before it.
+            std::uint64_t shownAt = 0;
+            {
+                std::lock_guard const lock{_scheduleMutex};
+                shownAt = _scheduledFrames * 1'000'000'000ULL * static_cast<std::uint64_t>(_mode.rateDenominator) /
+                          static_cast<std::uint64_t>(_mode.rateNumerator);
+            }
+            auto const now = steadyNowNs();
+            auto const slack = shownAt > *stream + _scheduleMarginNs ? shownAt - *stream - _scheduleMarginNs : 0;
+            auto const fromStream = now + std::min(slack, _frameWaitNs);
+            // A clock that steps in whole frames lags the real position by up
+            // to a frame: then the earlier of both estimates.
+            _readDeadlineNs = _streamWholeFrames.load() ? std::min(fromStream, _readDeadlineNs) : fromStream;
+        }
         if (!scheduleGrain(idx, readBudgetNs()))
         {
             _framesDropped->inc();
@@ -1560,6 +1728,19 @@ namespace mxldl::channel
             _catchUpsLogged = catchUps;
             _catchUpGrainsLogged = grains;
             _catchUpLogNs = now;
+        }
+        auto const invalid = _invalidGrains.load();
+        if (invalid != _invalidGrainsLogged && due(_invalidLogNs))
+        {
+            log::info("source_invalid_grain",
+                {
+                    {"channel_index", _cfg.index},
+                    {"channel_label", _cfg.label},
+                    {"frames_repeated", invalid - _invalidGrainsLogged},
+                    {"details", "the source marked grains invalid (no picture for them, e.g. a gap after a freeze): the last frame is repeated"},
+                });
+            _invalidGrainsLogged = invalid;
+            _invalidLogNs = now;
         }
         auto const readErrors = _readErrors.load();
         if (readErrors != _readErrorsLogged && due(_readErrorLogNs))

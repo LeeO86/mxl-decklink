@@ -469,6 +469,25 @@ namespace mxldl::config
             {
                 ch.readerTimeoutMs = parseInt(key("READER_TIMEOUT_MS"), *v, 1, 10000);
             }
+            if (auto const v = env.get(key("SDI_LEVEL")))
+            {
+                if (*v == "A" || *v == "a")
+                {
+                    ch.sdiLevel = SdiLevel::A;
+                }
+                else if (*v == "B" || *v == "b")
+                {
+                    ch.sdiLevel = SdiLevel::B;
+                }
+                else if (*v == "driver")
+                {
+                    ch.sdiLevel = SdiLevel::Driver;
+                }
+                else
+                {
+                    fail(key("SDI_LEVEL") + ": must be A, B or driver");
+                }
+            }
             if (auto const v = env.get(key("READ_OFFSET_GRAINS")))
             {
                 ch.readOffsetGrains = parseInt(key("READ_OFFSET_GRAINS"), *v, 0, 64);
@@ -615,6 +634,17 @@ namespace mxldl::config
             }
             return std::string(v);
         };
+    }
+
+    char const* sdiLevelName(SdiLevel level)
+    {
+        switch (level)
+        {
+            case SdiLevel::A: return "A";
+            case SdiLevel::B: return "B";
+            case SdiLevel::Driver: return "driver";
+        }
+        return "?";
     }
 
     bool globalPartEquals(Config const& a, Config const& b)
