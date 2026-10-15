@@ -25,7 +25,10 @@ MXL v1.1 API rather than the spec's paraphrase of it).
 - **Resilience**: per-channel fault isolation with exponential-backoff
   reconnect; signal-loss standby + stream reset; auto format detection with
   flow replacement (new UUID) on format change; card-profile ownership with
-  fail-fast (exit 2) on external profile changes.
+  fail-fast (exit 2) on external profile changes. Output channels re-open
+  an MXL reader whose flow was re-created under the same id
+  (`MXL_ERR_FLOW_INVALID`) and repeat the last frame meanwhile
+  (`mxl_decklink_flow_reopens_total`, log `mxl_flow_recreated`).
 - **Ops + web control** (spec §7.1 / §7.5): one consolidated HTTP port
   `WEB_PORT` (default 8080) serves `/livez`, `/readyz`, `/statusz`, Prometheus
   `/metrics`, and — when `WEB_ENABLE=true` — the embedded Vue SPA + REST API
@@ -314,7 +317,9 @@ Documented in detail in IMPLEMENTATION_PLAN.md §3:
   grain is read, the channel waits until that grain and the audio samples at
   the same TAI time are available. Each channel's group lives on its own MXL
   instance of the domain: MXL walks the groups of a reader's instance without
-  locking them when a reader is released.
+  locking them when a reader is released. The channel's readers live on
+  another instance of its own (not the one shared with the writers), so a
+  re-created flow can be re-opened without the other channels.
 - **Grain commit semantics** follow the real API (`validSlices`/`totalSlices`
   and `MXL_GRAIN_FLAG_INVALID`) rather than the spec's `committedSize` field.
 

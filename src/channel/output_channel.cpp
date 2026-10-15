@@ -2,10 +2,10 @@
 #include "output_channel.hpp"
 
 #include <chrono>
+#include <limits>
+#include <string>
 
 #include <mxl/time.h>
-
-#include <limits>
 
 #include "util/logging.hpp"
 #include "util/taiclock.hpp"
@@ -27,6 +27,31 @@ namespace mxldl::channel
         // triggers a preroll reset.
         constexpr std::uint64_t kLateWindowNs = 10'000'000'000ULL;
         constexpr std::uint64_t kLateThreshold = 25;
+
+        std::uint64_t steadyNowNs()
+        {
+            return static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+        }
+
+        bool sameRate(mxlRational const& a, mxlRational const& b)
+        {
+            return a.numerator == b.numerator && a.denominator == b.denominator;
+        }
+
+        // A re-created flow is re-opened in place only when the channel can
+        // keep its playback session; otherwise the channel restarts.
+        bool sameVideoFormat(mxlFlowConfigInfo const& a, mxlFlowConfigInfo const& b)
+        {
+            return a.common.format == b.common.format && sameRate(a.common.grainRate, b.common.grainRate) &&
+                   a.discrete.sliceSizes[0] == b.discrete.sliceSizes[0];
+        }
+
+        bool sameAudioFormat(mxlFlowConfigInfo const& a, mxlFlowConfigInfo const& b)
+        {
+            return a.common.format == b.common.format && sameRate(a.common.grainRate, b.common.grainRate) &&
+                   a.continuous.channelCount == b.continuous.channelCount;
+        }
     }
 
     OutputChannel::OutputChannel(config::Config const& globalCfg, config::ChannelConfig const& chCfg, dl::ISubDevice& subDevice,
@@ -50,6 +75,7 @@ namespace mxldl::channel
         _framesDropped = &metrics.counter("mxl_decklink_frames_dropped_total", "Frames dropped", labels);
         _framesLate = &metrics.counter("mxl_decklink_frames_late_total", "Frames displayed late", labels);
         _reconnectTotal = &metrics.counter("mxl_decklink_reconnect_total", "Channel reconnect attempts", labels);
+        _flowReopens = &metrics.counter("mxl_decklink_flow_reopens_total", "MXL flows re-created by their writer; the reader was re-opened", labels);
         _stateGauge = &metrics.gauge("mxl_decklink_channel_state", "Channel state (0=init 1=healthy 2=degraded 3=failed)", labels);
         _bufferedVideoGauge = &metrics.gauge("mxl_decklink_buffered_video_frames", "Frames buffered in the device", labels);
         _bufferedAudioGauge = &metrics.gauge("mxl_decklink_buffered_audio_samples", "Audio sample frames buffered in the device", labels);
@@ -103,7 +129,11 @@ namespace mxldl::channel
 
     void OutputChannel::stop()
     {
-        _running.store(false);
+        {
+            std::lock_guard const lock{_wakeMutex};
+            _running.store(false);
+        }
+        _wake.notify_all();
         if (_supervisor.joinable())
         {
             _supervisor.join();
@@ -164,13 +194,26 @@ namespace mxldl::channel
                 continue;
             }
 
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            reopenInvalidReaders();
+            waitForWork(std::chrono::milliseconds(100));
         }
+    }
+
+    void OutputChannel::waitForWork(std::chrono::milliseconds timeout)
+    {
+        std::unique_lock lock{_wakeMutex};
+        _wake.wait_for(lock, timeout, [this] {
+            return _reopenRequested.load() || !_running.load();
+        });
     }
 
     bool OutputChannel::bringUp()
     {
         setState(State::Init);
+        _videoFlowInvalid = false;
+        _reopenRequested.store(false);
+        _reopen.clear();
+        _reopenDegraded = false;
         try
         {
             _mode = *_cfg.videoMode;
@@ -194,6 +237,8 @@ namespace mxldl::channel
                 return false;
             }
             _videoReader = std::make_unique<mxlbridge::VideoReader>(readerDomain(), _cfg.videoFlowId.toString());
+            _videoRate = _videoReader->grainRate();
+            _videoConfig = _videoReader->configInfo();
             _audioFlows.clear();
             if (_cfg.audioEnable)
             {
@@ -205,6 +250,7 @@ namespace mxldl::channel
                     if (!afCfg.flowId.isNil() && afCfg.mxlActive)
                     {
                         slot.reader = std::make_unique<mxlbridge::AudioReader>(readerDomain(), afCfg.flowId.toString());
+                        slot.config = slot.reader->configInfo();
                     }
                     // Nil UUID = unassigned: mapped DeckLink channels stay silent.
                     _audioFlows.push_back(std::move(slot));
@@ -256,7 +302,7 @@ namespace mxldl::channel
                 return false;
             }
 
-            auto const rate = _videoReader->grainRate();
+            auto const rate = _videoRate;
             _samplesPerFrame = static_cast<std::size_t>(48000ULL * static_cast<std::uint64_t>(rate.denominator) /
                                                         static_cast<std::uint64_t>(rate.numerator));
 
@@ -357,6 +403,7 @@ namespace mxldl::channel
             sync = std::move(_sync);
             playback = std::move(_playback);
             videoReader = std::move(_videoReader);
+            _videoFlowInvalid = false;
             audioFlows.swap(_audioFlows);
         }
         // Freed outside the lock: releasing the SDK objects may wait for a
@@ -371,24 +418,46 @@ namespace mxldl::channel
     bool OutputChannel::scheduleGrain(std::uint64_t grainIndex)
     {
         mxlbridge::VideoReader::Grain grain;
-        auto const timeoutNs = static_cast<std::uint64_t>(_cfg.readerTimeoutMs) * 1'000'000ULL;
-        auto grainTimeoutNs = timeoutNs;
-        if (_sync)
+        mxlStatus status = MXL_ERR_UNKNOWN;
+        // While the supervisor re-opens a re-created video flow there is no
+        // reader to read: the last frame is repeated below.
+        if (_videoReader && !_videoFlowInvalid)
         {
-            auto const rate = _videoReader->grainRate();
-            auto const timestamp = ::mxlIndexToTimestamp(&rate, grainIndex);
-            if (timestamp != std::numeric_limits<std::uint64_t>::max())
+            auto const timeoutNs = static_cast<std::uint64_t>(_cfg.readerTimeoutMs) * 1'000'000ULL;
+            auto grainTimeoutNs = timeoutNs;
+            if (_sync)
             {
-                // One wait covers the video grain and the audio sample at the
-                // same TAI time. A successful wait means the grain fetch below
-                // should not block.
-                if (_sync->waitFor(timestamp, timeoutNs) == MXL_STATUS_OK)
+                auto const timestamp = ::mxlIndexToTimestamp(&_videoRate, grainIndex);
+                if (timestamp != std::numeric_limits<std::uint64_t>::max())
                 {
-                    grainTimeoutNs = 0;
+                    // One wait covers the video grain and the audio sample at
+                    // the same TAI time. A successful wait means the grain
+                    // fetch below should not block.
+                    auto const waited = _sync->waitFor(timestamp, timeoutNs);
+                    if (waited == MXL_STATUS_OK)
+                    {
+                        grainTimeoutNs = 0;
+                    }
+                    else if (waited == MXL_ERR_FLOW_INVALID)
+                    {
+                        // A reader of the group has a re-created flow; MXL
+                        // says so only after the wait timed out. Find it and
+                        // take it out of the group so later waits do not
+                        // block on it.
+                        findInvalidReaders();
+                        grainTimeoutNs = 0;
+                    }
+                }
+            }
+            if (!_videoFlowInvalid)
+            {
+                status = _videoReader->getGrain(grainIndex, grainTimeoutNs, grain);
+                if (status == MXL_ERR_FLOW_INVALID)
+                {
+                    markVideoFlowInvalid();
                 }
             }
         }
-        auto const status = _videoReader->getGrain(grainIndex, grainTimeoutNs, grain);
 
         std::uint8_t const* bytes = nullptr;
         std::size_t size = 0;
@@ -403,8 +472,10 @@ namespace mxldl::channel
         }
         else if (!_lastFrame.empty())
         {
-            // Reader timeout or invalid grain: repeat the previous frame so
-            // the output stays continuous; counted as a drop (§2.4).
+            // Reader timeout, invalid grain, or a re-created flow being
+            // re-opened: repeat the previous frame so the output stays
+            // continuous; counted as a drop (§2.4), but not towards the
+            // late/drop preroll reset, which counts DeckLink completions only.
             bytes = _lastFrame.data();
             size = _lastFrame.size();
             repeated = true;
@@ -511,11 +582,12 @@ namespace mxldl::channel
 
         bool anyOk = false;
         bool tooEarly = false;
-        for (auto& af : _audioFlows)
+        for (std::size_t slot = 0; slot < _audioFlows.size(); ++slot)
         {
-            if (!af.reader)
+            auto& af = _audioFlows[slot];
+            if (!af.reader || af.flowInvalid)
             {
-                continue; // nil UUID → leave mapped channels silent
+                continue; // nil UUID, or a re-created flow being re-opened → silent
             }
             auto const status =
                 af.reader->readSamples(_nextAudioEndIndex, _samplesPerFrame, timeoutNs, pcm, deckChannels, af.cfg.deckLinkChannels, _cfg.audioSampleType);
@@ -526,6 +598,10 @@ namespace mxldl::channel
             else if (status == MXL_ERR_OUT_OF_RANGE_TOO_EARLY)
             {
                 tooEarly = true;
+            }
+            else if (status == MXL_ERR_FLOW_INVALID)
+            {
+                markAudioFlowInvalid(slot);
             }
         }
 
@@ -549,20 +625,286 @@ namespace mxldl::channel
 
     mxlbridge::Domain& OutputChannel::readerDomain()
     {
-        if (!_cfg.readerDomainPath.empty() && _cfg.readerDomainPath != _domain.path())
+        // Always a private instance, also for this function's own domain:
+        // re-opening a re-created flow needs the last reference to the stale
+        // reader on the instance to go (see _readerDomain).
+        auto const& path = _cfg.readerDomainPath.empty() ? _domain.path() : _cfg.readerDomainPath;
+        if (!_readerDomain || _readerDomain->path() != path)
         {
-            if (!_foreignDomain || _foreignDomain->path() != _cfg.readerDomainPath)
-            {
-                _foreignDomain = std::make_unique<mxlbridge::Domain>(_cfg.readerDomainPath);
-            }
-            return *_foreignDomain;
+            _readerDomain = std::make_unique<mxlbridge::Domain>(path);
         }
-        return _domain;
+        return *_readerDomain;
+    }
+
+    void OutputChannel::requestReopen()
+    {
+        {
+            std::lock_guard const lock{_wakeMutex};
+            _reopenRequested.store(true);
+        }
+        _wake.notify_one();
+    }
+
+    void OutputChannel::markVideoFlowInvalid()
+    {
+        if (_videoFlowInvalid || !_videoReader)
+        {
+            return;
+        }
+        _videoFlowInvalid = true;
+        if (_sync)
+        {
+            _sync->removeReader(_videoReader->handle());
+        }
+        requestReopen();
+    }
+
+    void OutputChannel::markAudioFlowInvalid(std::size_t slot)
+    {
+        // Slots that read the same flow share one MXL reader: all of them go,
+        // or the re-open would get the stale reader back.
+        auto const flowId = _audioFlows[slot].cfg.flowId;
+        bool marked = false;
+        for (auto& af : _audioFlows)
+        {
+            if (af.reader && !af.flowInvalid && af.cfg.flowId == flowId)
+            {
+                af.flowInvalid = true;
+                if (_sync)
+                {
+                    _sync->removeReader(af.reader->handle());
+                }
+                marked = true;
+            }
+        }
+        if (marked)
+        {
+            requestReopen();
+        }
+    }
+
+    void OutputChannel::findInvalidReaders()
+    {
+        if (_videoReader && !_videoFlowInvalid && _videoReader->flowInvalid())
+        {
+            markVideoFlowInvalid();
+        }
+        for (std::size_t slot = 0; slot < _audioFlows.size(); ++slot)
+        {
+            auto const& af = _audioFlows[slot];
+            if (af.reader && !af.flowInvalid && af.reader->flowInvalid())
+            {
+                markAudioFlowInvalid(slot);
+            }
+        }
+    }
+
+    void OutputChannel::reopenInvalidReaders()
+    {
+        auto const now = steadyNowNs();
+        if (_reopenRequested.exchange(false))
+        {
+            _reopen.flowInvalid(now);
+        }
+        if (!_reopen.pending())
+        {
+            return;
+        }
+        if (!_streamingUp.load())
+        {
+            // A restart opens every reader anyway.
+            _reopen.clear();
+            return;
+        }
+        if (!_reopen.due(now))
+        {
+            if (!_reopenDegraded && _reopen.degraded(now))
+            {
+                _reopenDegraded = true;
+                setState(State::Degraded);
+            }
+            return;
+        }
+
+        // Take the invalid readers out; the callbacks already took them out
+        // of the sync group and no longer read them.
+        std::unique_ptr<mxlbridge::VideoReader> oldVideo;
+        std::vector<std::unique_ptr<mxlbridge::AudioReader>> oldAudio;
+        bool wantVideo = false;
+        std::vector<std::size_t> wantAudio;
+        std::vector<std::size_t> newAudioEvents;
+        {
+            std::lock_guard const lock{_callbackMutex};
+            if (_videoFlowInvalid)
+            {
+                wantVideo = true;
+                oldVideo = std::move(_videoReader);
+            }
+            for (std::size_t slot = 0; slot < _audioFlows.size(); ++slot)
+            {
+                auto& af = _audioFlows[slot];
+                if (af.flowInvalid)
+                {
+                    wantAudio.push_back(slot);
+                    if (af.reader)
+                    {
+                        newAudioEvents.push_back(slot);
+                        oldAudio.push_back(std::move(af.reader));
+                    }
+                }
+            }
+        }
+
+        // A reader still held here is a new event: log and count it once per
+        // flow (slots sharing a flow share the event).
+        auto const announce = [this](char const* essence, util::Uuid const& flowId) {
+            _flowReopens->inc();
+            log::info("mxl_flow_recreated",
+                {
+                    {"channel_index", _cfg.index},
+                    {"channel_label", _cfg.label},
+                    {"essence", essence},
+                    {"flow_id", flowId.toString()},
+                    {"details", "MXL_ERR_FLOW_INVALID: the writer re-created the flow; re-opening the reader"},
+                });
+        };
+        if (oldVideo)
+        {
+            announce("video", _cfg.videoFlowId);
+        }
+        std::vector<util::Uuid> announced;
+        for (auto const slot : newAudioEvents)
+        {
+            auto const& id = _audioFlows[slot].cfg.flowId;
+            bool seen = false;
+            for (auto const& a : announced)
+            {
+                seen = seen || a == id;
+            }
+            if (!seen)
+            {
+                announced.push_back(id);
+                announce("audio", id);
+            }
+        }
+
+        // Release first: the instance hands out its cached reader of a flow id
+        // as long as it holds one.
+        oldVideo.reset();
+        oldAudio.clear();
+
+        std::string error;
+        bool formatChanged = false;
+        std::unique_ptr<mxlbridge::VideoReader> newVideo;
+        std::vector<std::pair<std::size_t, std::unique_ptr<mxlbridge::AudioReader>>> newAudio;
+        if (wantVideo)
+        {
+            try
+            {
+                newVideo = std::make_unique<mxlbridge::VideoReader>(readerDomain(), _cfg.videoFlowId.toString());
+                formatChanged = formatChanged || !sameVideoFormat(newVideo->configInfo(), _videoConfig);
+            }
+            catch (std::exception const& e)
+            {
+                error = e.what();
+            }
+        }
+        for (auto const slot : wantAudio)
+        {
+            auto const& af = _audioFlows[slot];
+            try
+            {
+                auto reader = std::make_unique<mxlbridge::AudioReader>(readerDomain(), af.cfg.flowId.toString());
+                formatChanged = formatChanged || !sameAudioFormat(reader->configInfo(), af.config);
+                newAudio.emplace_back(slot, std::move(reader));
+            }
+            catch (std::exception const& e)
+            {
+                error = e.what();
+            }
+        }
+
+        if (formatChanged)
+        {
+            // Another format under the same id: restart the channel, which
+            // opens every reader and the playback session again.
+            log::warn("mxl_flow_recreated_format_changed", {{"channel_index", _cfg.index}, {"channel_label", _cfg.label}});
+            _reopen.clear();
+            _resetRequested.store(true);
+            return;
+        }
+
+        try
+        {
+            std::lock_guard const lock{_callbackMutex};
+            if (newVideo)
+            {
+                _videoReader = std::move(newVideo);
+                _videoFlowInvalid = false;
+                if (_sync)
+                {
+                    _sync->addReader(_videoReader->handle());
+                }
+            }
+            for (auto& [slot, reader] : newAudio)
+            {
+                auto& af = _audioFlows[slot];
+                af.reader = std::move(reader);
+                af.flowInvalid = false;
+                if (_sync)
+                {
+                    _sync->addReader(af.reader->handle());
+                }
+            }
+        }
+        catch (std::exception const& e)
+        {
+            log::warn("mxl_flow_reopen_failed", {{"channel_index", _cfg.index}, {"channel_label", _cfg.label}, {"details", e.what()}});
+            _reopen.clear();
+            _resetRequested.store(true);
+            return;
+        }
+
+        if (!error.empty())
+        {
+            // The flow is gone or not re-created yet: try again shortly.
+            if (_reopen.failures() == 0)
+            {
+                log::warn("mxl_flow_reopen_failed",
+                    {
+                        {"channel_index", _cfg.index},
+                        {"channel_label", _cfg.label},
+                        {"retry_in_ms", ReopenSchedule::retryDelayNs(0) / 1'000'000ULL},
+                        {"details", error},
+                    });
+            }
+            _reopen.openFailed(now);
+            if (!_reopenDegraded && _reopen.degraded(now))
+            {
+                _reopenDegraded = true;
+                setState(State::Degraded);
+            }
+            return;
+        }
+
+        log::info("mxl_flow_reopened",
+            {
+                {"channel_index", _cfg.index},
+                {"channel_label", _cfg.label},
+                {"attempts", _reopen.failures() + 1},
+                {"after_ms", _reopen.pendingForNs(steadyNowNs()) / 1'000'000ULL},
+            });
+        _reopen.clear();
+        if (_reopenDegraded)
+        {
+            _reopenDegraded = false;
+            setState(State::Healthy);
+        }
     }
 
     void OutputChannel::housekeeping()
     {
-        if (!_streamingUp.load() || !_playback || !_videoReader)
+        if (!_streamingUp.load() || !_playback)
         {
             return;
         }
@@ -573,7 +915,16 @@ namespace mxldl::channel
         _status.bufferedAudioFrames.store(audioBuffered);
         _status.signalLocked.store(_playback->referenceLocked());
 
-        auto const head = _videoReader->headIndex();
+        // The supervisor swaps the video reader when its flow is re-created.
+        std::uint64_t head = 0;
+        {
+            std::lock_guard const lock{_callbackMutex};
+            if (!_videoReader || _videoFlowInvalid)
+            {
+                return;
+            }
+            head = _videoReader->headIndex();
+        }
         std::uint64_t next = 0;
         {
             std::lock_guard const lock{_scheduleMutex};

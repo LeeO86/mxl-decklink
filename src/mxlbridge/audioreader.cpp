@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "audioreader.hpp"
 
+#include <limits>
 #include <stdexcept>
 
 #include "util/audioconv.hpp"
@@ -75,5 +76,11 @@ namespace mxldl::mxlbridge
             remaining -= count;
         }
         return MXL_STATUS_OK;
+    }
+
+    bool AudioReader::flowInvalid() const
+    {
+        mxlWrappedMultiBufferSlice slices{};
+        return ::mxlFlowReaderGetSamplesNonBlocking(_reader, std::numeric_limits<std::uint64_t>::max() - 1, 1, &slices) == MXL_ERR_FLOW_INVALID;
     }
 }

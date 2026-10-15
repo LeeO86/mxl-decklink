@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24 FATAL_ERROR)
 
 project(mxl-decklink
-    VERSION 1.0.3
+    VERSION 1.0.4
     DESCRIPTION "MXL MediaFunction container for Blackmagic DeckLink"
     LANGUAGES CXX
 )
@@ -202,6 +202,7 @@ if(MXL_DECKLINK_BUILD_TESTS)
         tests/unit/test_schema.cpp
         tests/unit/test_nmos_routing.cpp
         tests/unit/test_flowsync.cpp
+        tests/unit/test_flow_reopen.cpp
     )
     target_link_libraries(unit-tests PRIVATE mxl-decklink-core)
     add_test(NAME unit-tests COMMAND unit-tests)
