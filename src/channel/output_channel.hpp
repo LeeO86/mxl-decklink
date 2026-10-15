@@ -111,7 +111,10 @@ namespace mxldl::channel
         static void noteHead(std::uint64_t head, std::uint64_t nowNs, std::uint64_t& lastHead, std::uint64_t& changedNs);
         /// Grains to skip ahead after reading `grainIndex` with the source's
         /// newest grain at `head` (0 = none; §2.4 read position).
-        [[nodiscard]] std::int64_t catchUp(std::uint64_t grainIndex, std::uint64_t head) const;
+        /// `now`: out of the ring, skip at once (else only after it lasted).
+        [[nodiscard]] std::int64_t catchUp(std::uint64_t grainIndex, std::uint64_t head, bool now);
+        /// Bring-up: CHx_READ_OFFSET_GRAINS within the flows' history.
+        void capReadOffset(std::uint64_t preroll);
         /// Supervisor thread: logs stall start/end and keeps the channel
         /// `degraded` while a stall lasts longer than 1 s.
         void superviseStalls();
@@ -194,6 +197,8 @@ namespace mxldl::channel
         std::uint64_t _videoLastHead = 0; // head index last seen
         std::uint64_t _videoHeadChangeNs = 0; // steady ns when it last changed
         std::uint64_t _periodNs = 20'000'000ULL; // frame period, set at bring-up
+        int _readOffset = 0; // CHx_READ_OFFSET_GRAINS, capped at bring-up
+        std::uint64_t _behindSinceNs = 0; // catch-up condition held since (steady ns), _callbackMutex
         std::atomic<std::uint64_t> _lateSinceNs{0}; // steady ns of the first source_late in a row; 0 = none
         bool _lateDegraded = false; // supervisor thread only
         std::atomic<std::uint64_t> _stallRepeatsAtStart{0};

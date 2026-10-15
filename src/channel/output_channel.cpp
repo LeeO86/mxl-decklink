@@ -46,6 +46,9 @@ namespace mxldl::channel
         // §2.4: a read more than this many grains (plus the read offset)
         // behind the source's newest grain skips ahead to it.
         constexpr std::uint64_t kCatchUpGrains = 2;
+        // ... for this long in a row (a burst after an output-side delay
+        // reads behind the head for a few frames only).
+        constexpr std::uint64_t kCatchUpAfterNs = 1'000'000'000ULL;
         // §2.4: a source late for this long marks the channel degraded.
         constexpr std::uint64_t kLateDegradedNs = 1'000'000'000ULL;
 
@@ -254,6 +257,7 @@ namespace mxldl::channel
         _videoHeadChangeNs = 0;
         _lateSinceNs.store(0);
         _lateDegraded = false;
+        _behindSinceNs = 0;
         _stallSinceNs.store(0);
         _stallDegraded = false;
         _stallLogged = false;
@@ -370,7 +374,8 @@ namespace mxldl::channel
             // CHx_READ_OFFSET_GRAINS: that many grains further behind (§2.4).
             auto const currentIndex = ::mxlGetCurrentIndex(&rate);
             std::uint64_t const preroll = static_cast<std::uint64_t>(_cfg.outputPrerollGrains);
-            std::uint64_t const behind = preroll + static_cast<std::uint64_t>(_cfg.readOffsetGrains);
+            capReadOffset(preroll);
+            std::uint64_t const behind = preroll + static_cast<std::uint64_t>(_readOffset);
             {
                 std::lock_guard const lock{_scheduleMutex};
                 _nextGrainIndex = currentIndex > behind ? currentIndex - behind : 0;
@@ -559,7 +564,7 @@ namespace mxldl::channel
                         reason = RepeatReason::ReadError; // when the grain is marked invalid
                         setVideoStalled(false);
                         _lateSinceNs.store(0);
-                        adjust = catchUp(grainIndex, head);
+                        adjust = catchUp(grainIndex, head, false);
                     }
                     else if (status == MXL_ERR_OUT_OF_RANGE_TOO_EARLY || status == MXL_ERR_TIMEOUT)
                     {
@@ -600,7 +605,7 @@ namespace mxldl::channel
                         {
                             // Fell out of the ring (the card ran slower than
                             // the source for long): skip to the source.
-                            adjust = catchUp(grainIndex, head);
+                            adjust = catchUp(grainIndex, head, true);
                         }
                     }
                 }
@@ -612,6 +617,7 @@ namespace mxldl::channel
         bool repeated = false;
 
         std::lock_guard const lock{_scheduleMutex};
+        auto const before = _nextGrainIndex;
         if (adjust < 0 && _nextGrainIndex > grainIndex)
         {
             _nextGrainIndex = grainIndex;
@@ -619,6 +625,15 @@ namespace mxldl::channel
         else if (adjust > 0)
         {
             _nextGrainIndex += static_cast<std::uint64_t>(adjust);
+        }
+        if (_nextGrainIndex != before && !_audioFlows.empty())
+        {
+            // The audio read position moves with the video's, so lip sync
+            // holds: audio block = (video grain - (preroll - 1)) x samples
+            // per frame. A slip plays one audio block again, a catch-up
+            // skips as many blocks as grains.
+            auto const delta = static_cast<std::int64_t>(_nextGrainIndex) - static_cast<std::int64_t>(before);
+            _nextAudioEndIndex = static_cast<std::uint64_t>(static_cast<std::int64_t>(_nextAudioEndIndex) + delta * static_cast<std::int64_t>(_samplesPerFrame));
         }
         if (status == MXL_STATUS_OK && grain.payload != nullptr && (grain.info.flags & MXL_GRAIN_FLAG_INVALID) == 0)
         {
@@ -1334,6 +1349,48 @@ namespace mxldl::channel
         }
     }
 
+    void OutputChannel::capReadOffset(std::uint64_t preroll)
+    {
+        // The read position at start is preroll + offset grains behind the
+        // newest grain. MXL keeps grainCount - 2 grains readable for video
+        // (PosixDiscreteFlowReader minIndex) and bufferLength / 2 samples for
+        // audio; one grain / one frame of samples stays spare.
+        auto const requested = static_cast<std::int64_t>(_cfg.readOffsetGrains);
+        std::int64_t cap = requested;
+        std::uint32_t grainCount = 0;
+        std::uint32_t bufferLength = 0;
+        if (_videoReader)
+        {
+            grainCount = _videoReader->grainCount();
+            cap = std::min<std::int64_t>(cap, static_cast<std::int64_t>(grainCount) - 3 - static_cast<std::int64_t>(preroll));
+        }
+        for (auto const& af : _audioFlows)
+        {
+            if (af.reader && _samplesPerFrame > 0)
+            {
+                auto const length = af.reader->bufferLength();
+                bufferLength = bufferLength == 0 ? length : std::min(bufferLength, length);
+                auto const frames = static_cast<std::int64_t>(length / 2 / _samplesPerFrame);
+                cap = std::min<std::int64_t>(cap, frames - 1 - static_cast<std::int64_t>(preroll));
+            }
+        }
+        _readOffset = static_cast<int>(std::max<std::int64_t>(cap, 0));
+        if (_readOffset != _cfg.readOffsetGrains)
+        {
+            log::warn("read_offset_capped",
+                {
+                    {"channel_index", _cfg.index},
+                    {"channel_label", _cfg.label},
+                    {"requested", _cfg.readOffsetGrains},
+                    {"effective", _readOffset},
+                    {"preroll_grains", _cfg.outputPrerollGrains},
+                    {"video_grain_count", grainCount},
+                    {"audio_buffer_length", bufferLength},
+                    {"details", "CHx_READ_OFFSET_GRAINS + CHx_OUTPUT_PREROLL_GRAINS must stay inside the flows' history"},
+                });
+        }
+    }
+
     void OutputChannel::noteHead(std::uint64_t head, std::uint64_t nowNs, std::uint64_t& lastHead, std::uint64_t& changedNs)
     {
         if (head != lastHead || changedNs == 0)
@@ -1343,19 +1400,38 @@ namespace mxldl::channel
         }
     }
 
-    std::int64_t OutputChannel::catchUp(std::uint64_t grainIndex, std::uint64_t head) const
+    std::int64_t OutputChannel::catchUp(std::uint64_t grainIndex, std::uint64_t head, bool now)
     {
         // Normally the newest grain is at most one ahead of the read position
-        // plus the read offset. Much further behind (the card ran slower
-        // than the source, or the source's latency shrank after slips): skip
-        // ahead so the output does not lag ever more or fall out of the ring.
-        // The preroll reads further back on purpose.
-        auto const offset = static_cast<std::uint64_t>(_cfg.readOffsetGrains);
-        if (_playing.load() && head > grainIndex + offset + kCatchUpGrains)
+        // plus the read offset. Much further behind for a sustained time (the
+        // card ran slower than the source, or the source's latency shrank
+        // after slips): skip ahead so the output does not lag ever more or
+        // fall out of the ring. A short burst of completions after an
+        // output-side delay also reads behind the head for a few frames: it
+        // must not skip real grains, hence the time. Out of the ring
+        // (`now`) it skips at once. The preroll reads further back on
+        // purpose.
+        if (!_playing.load())
         {
-            return static_cast<std::int64_t>(head - grainIndex - offset - 1);
+            return 0;
         }
-        return 0;
+        auto const offset = static_cast<std::uint64_t>(_readOffset);
+        if (head <= grainIndex + offset + kCatchUpGrains)
+        {
+            _behindSinceNs = 0;
+            return 0;
+        }
+        auto const t = steadyNowNs();
+        if (_behindSinceNs == 0)
+        {
+            _behindSinceNs = t;
+        }
+        if (!now && t - _behindSinceNs < kCatchUpAfterNs)
+        {
+            return 0;
+        }
+        _behindSinceNs = 0;
+        return static_cast<std::int64_t>(head - grainIndex - offset - 1);
     }
 
     void OutputChannel::housekeeping()

@@ -79,6 +79,12 @@ TEST_CASE("reopen schedule: at once, then 100 ms, 200 ms, 500 ms and every 1 s w
 namespace
 {
     constexpr std::uint8_t kGen1 = 0x11;
+    // Video sources write the grain index at this byte offset of each frame;
+    // stamped audio sources write the 20 ms block number (sample index / 960)
+    // modulo kStampModulo, shifted left by 16, into every sample (exact
+    // through MXL's float32 samples).
+    constexpr std::size_t kStampAt = 8;
+    constexpr std::uint64_t kStampModulo = 30000;
     constexpr std::uint8_t kGen2 = 0x22;
 
     /// What the fake card was asked to play.
@@ -89,6 +95,55 @@ namespace
         std::uint64_t audioBlocks = 0;
         std::uint64_t audioBlocksWithSound = 0;
         std::uint64_t late = 0; // completions reported DisplayedLate
+        /// Stamped sources (kStampAt): the grain index of every scheduled
+        /// frame, and per audio block the block number paired with the grain
+        /// scheduled last (both modulo kStampModulo).
+        std::vector<std::int64_t> grains;
+        std::vector<std::pair<std::int64_t, std::int64_t>> avPairs;
+        std::atomic<int> delayMs{0}; // the card holds the next completion this long
+
+        /// Median of audio block - video grain over the pairs from `from`:
+        /// constant while audio and video stay in sync.
+        std::int64_t avOffset(std::size_t from)
+        {
+            std::lock_guard const lock{mutex};
+            std::vector<std::int64_t> d;
+            for (auto i = from; i < avPairs.size(); ++i)
+            {
+                d.push_back(avPairs[i].first - avPairs[i].second);
+            }
+            if (d.empty())
+            {
+                return 1'000'000;
+            }
+            std::sort(d.begin(), d.end());
+            return d[d.size() / 2];
+        }
+
+        std::size_t pairCount()
+        {
+            std::lock_guard const lock{mutex};
+            return avPairs.size();
+        }
+
+        /// Largest step between consecutive scheduled grains from `from` (1 =
+        /// none skipped; a repeat is 0).
+        std::int64_t largestGrainStep(std::size_t from)
+        {
+            std::lock_guard const lock{mutex};
+            std::int64_t step = 0;
+            for (auto i = std::max<std::size_t>(from, 1); i < grains.size(); ++i)
+            {
+                step = std::max(step, grains[i] - grains[i - 1]);
+            }
+            return step;
+        }
+
+        std::size_t grainCount()
+        {
+            std::lock_guard const lock{mutex};
+            return grains.size();
+        }
 
         std::uint64_t lateFrames()
         {
@@ -153,6 +208,12 @@ namespace
         {
             std::lock_guard const lock{_played->mutex};
             _played->frames.push_back(size > 0 ? bytes[0] : 0);
+            if (size >= kStampAt + sizeof(std::uint64_t))
+            {
+                std::uint64_t index = 0;
+                std::memcpy(&index, bytes + kStampAt, sizeof index);
+                _played->grains.push_back(static_cast<std::int64_t>(index % kStampModulo));
+            }
             auto const id = _nextId++;
             bool late = false;
             if (_running)
@@ -175,6 +236,11 @@ namespace
             std::lock_guard const lock{_played->mutex};
             ++_played->audioBlocks;
             _played->audioBlocksWithSound += sound ? 1 : 0;
+            if (sound && !_played->grains.empty())
+            {
+                // A stamped source writes the block number into each sample.
+                _played->avPairs.emplace_back(static_cast<std::int64_t>(samples[0] >> 16), _played->grains.back());
+            }
             return std::nullopt;
         }
 
@@ -217,6 +283,12 @@ namespace
                             }
                             _queue.pop_front();
                         }
+                    }
+                    if (auto const delay = _played->delayMs.exchange(0); delay > 0)
+                    {
+                        // Output-side trouble: the card's calls come late,
+                        // then in a burst (sleep_until is already past).
+                        std::this_thread::sleep_for(std::chrono::milliseconds(delay));
                     }
                     if (id && _running)
                     {
@@ -355,6 +427,10 @@ namespace
                 if (index > _last)
                 {
                     _last = index;
+                    if (_frame.size() >= kStampAt + sizeof index)
+                    {
+                        std::memcpy(_frame.data() + kStampAt, &index, sizeof index);
+                    }
                     (void)_writer.writeFrame(index, _frame.data(), _frame.size());
                 }
             })
@@ -369,6 +445,9 @@ namespace
         std::uint64_t _last = 0;
         Pump _pump; // last: stops before the writer goes
     };
+
+    /// AudioSource value that stamps each sample with its block number.
+    constexpr std::int32_t kStamped = -1;
 
     /// An audio writer that commits every sample up to the current TAI time
     /// less `lag` samples; with `block`, only whole blocks of that size.
@@ -396,6 +475,15 @@ namespace
                 {
                     auto const count = _block != 0 ? _block : std::min<std::uint64_t>(now - _last, 480);
                     _pcm.assign(static_cast<std::size_t>(count) * 2, _value);
+                    if (_value == kStamped)
+                    {
+                        for (std::uint64_t i = 0; i < count; ++i)
+                        {
+                            auto const stamp = static_cast<std::int32_t>(((_last + i) / 960 % kStampModulo) << 16);
+                            _pcm[2 * i] = stamp;
+                            _pcm[2 * i + 1] = stamp;
+                        }
+                    }
                     int const map[] = {0, 1};
                     (void)_writer.writeSamples(_last + count, _pcm.data(), static_cast<std::size_t>(count), 2, map, config::AudioSampleType::Int32);
                     _last += count;
@@ -723,20 +811,25 @@ TEST_CASE("a source stall repeats the last frame and plays silence without a pre
     video.reset();
 }
 
-TEST_CASE("a source whose latency grows keeps playing: the read position slips behind it")
+TEST_CASE("a source whose latency grows keeps playing: the read position slips behind it, audio in sync")
 {
     // A mirror back from an origin restart with more buffering, or a card a
     // few ppm fast: the grains come ever later. A read position that stayed
     // ahead would repeat the last frame for good (the card is never late, so
     // no preroll reset re-aligns), with the channel healthy.
     Rig rig("late");
+    rig.withAudio();
     auto video = std::make_unique<VideoSource>(*rig.domain, rig.video, kGen1);
+    auto audio = std::make_unique<AudioSource>(*rig.domain, rig.audio, kStamped);
     std::this_thread::sleep_for(200ms);
 
     channel::OutputChannel out(rig.global, rig.ch, *rig.sub, *rig.domain, rig.metrics, "test");
     out.start();
     REQUIRE(waitUntil([&] { return out.status().state.load() == channel::State::Healthy; }, 3s));
-    REQUIRE(waitUntil([&] { return out.status().grainsCommitted.load() >= 10; }, 2s));
+    REQUIRE(waitUntil([&] { return rig.played->pairCount() >= 20; }, 2s));
+    std::this_thread::sleep_for(300ms);
+    auto const inSync = rig.played->avOffset(rig.played->pairCount() - 15);
+    INFO("audio block - video grain at start: " << inSync);
 
     // One grain later every 300 ms, up to 4 grains (80 ms, beyond the 35 ms
     // the card lets a read wait).
@@ -748,24 +841,59 @@ TEST_CASE("a source whose latency grows keeps playing: the read position slips b
     std::this_thread::sleep_for(300ms);
     auto const grains = out.status().grainsCommitted.load();
     auto const repeats = out.status().framesRepeated.load();
+    auto const pairs = rig.played->pairCount();
     std::this_thread::sleep_for(1000ms);
     CHECK(out.status().grainsCommitted.load() - grains >= 40); // live frames, not a frozen one
     CHECK(out.status().framesRepeated.load() - repeats <= 2);
     CHECK(rig.counter("mxl_decklink_frames_repeated_total", "reason", "source_late") <= 16.0);
     CHECK(out.status().state.load() == channel::State::Healthy);
+    // Each slip repeated an audio block too: audio is as far behind the
+    // video grain as before.
+    CHECK(rig.played->avOffset(pairs) == inSync);
 
-    // The latency shrinks again: the read position catches up with the source
-    // instead of lagging 4 grains behind it.
+    // The latency shrinks again: after a second behind, the read position
+    // catches up with the source instead of lagging 4 grains behind it, and
+    // audio skips as many blocks.
     video->offset = 0;
-    std::this_thread::sleep_for(500ms);
+    std::this_thread::sleep_for(1500ms);
     out.housekeeping();
     CHECK(rig.metrics.gauge("mxl_decklink_reader_lag_grains", "", rig.labels()).value() <= 3.0);
     auto const after = out.status().grainsCommitted.load();
+    auto const pairsAfter = rig.played->pairCount();
     std::this_thread::sleep_for(500ms);
     CHECK(out.status().grainsCommitted.load() - after >= 20);
+    CHECK(rig.played->avOffset(pairsAfter) == inSync);
 
     CHECK(rig.played->lateFrames() <= 2);
     CHECK(rig.counter("mxl_decklink_frames_dropped_total") == 0.0);
+    CHECK(rig.reconnects() == 0.0);
+    out.stop();
+    audio.reset();
+    video.reset();
+}
+
+TEST_CASE("a burst of completions after an output-side delay skips no grain")
+{
+    // A loaded host holds the card's calls for 60 ms; they then come in a
+    // burst and read behind the newest grain for a few frames. That is no
+    // reason to skip ahead: every grain is still shown.
+    Rig rig("burst");
+    auto video = std::make_unique<VideoSource>(*rig.domain, rig.video, kGen1);
+    std::this_thread::sleep_for(200ms);
+
+    channel::OutputChannel out(rig.global, rig.ch, *rig.sub, *rig.domain, rig.metrics, "test");
+    out.start();
+    REQUIRE(waitUntil([&] { return out.status().state.load() == channel::State::Healthy; }, 3s));
+    REQUIRE(waitUntil([&] { return rig.played->grainCount() >= 10; }, 2s));
+    auto const from = rig.played->grainCount();
+    for (int i = 0; i < 3; ++i)
+    {
+        rig.played->delayMs = 60;
+        std::this_thread::sleep_for(400ms);
+    }
+    CHECK(rig.played->grainCount() - from >= 50);
+    CHECK(rig.played->largestGrainStep(from) == 1);
+    CHECK(out.status().framesRepeated.load() == 0);
     CHECK(rig.reconnects() == 0.0);
     out.stop();
     video.reset();
@@ -816,6 +944,37 @@ TEST_CASE("live audio written in whole frame blocks at the read position is not 
     CHECK(rig.played->blocks() - blocks == rig.played->soundBlocks() - sound);
     CHECK(rig.counter("mxl_decklink_source_stalls_total", "essence", "audio") == 0.0);
     CHECK(out.status().state.load() == channel::State::Healthy);
+    out.stop();
+    audio.reset();
+    video.reset();
+}
+
+TEST_CASE("CHx_READ_OFFSET_GRAINS beyond the flows' history is capped")
+{
+    // 64 grains behind is far outside a 200 ms history (10 grains at 50p):
+    // uncapped, the preroll would read grains that are gone. The output reads
+    // as far back as the video and audio rings allow and plays.
+    Rig rig("offsetcap");
+    rig.withAudio();
+    auto video = std::make_unique<VideoSource>(*rig.domain, rig.video, kGen1);
+    auto audio = std::make_unique<AudioSource>(*rig.domain, rig.audio, kStamped);
+    std::this_thread::sleep_for(300ms);
+    rig.ch.readOffsetGrains = 64;
+
+    channel::OutputChannel out(rig.global, rig.ch, *rig.sub, *rig.domain, rig.metrics, "test");
+    out.start();
+    REQUIRE(waitUntil([&] { return out.status().state.load() == channel::State::Healthy; }, 3s));
+    auto const grains = out.status().grainsCommitted.load();
+    auto const sound = rig.played->soundBlocks();
+    std::this_thread::sleep_for(1000ms);
+    CHECK(out.status().grainsCommitted.load() - grains >= 40);
+    CHECK(rig.played->soundBlocks() - sound >= 40);
+    CHECK(out.status().framesRepeated.load() <= 2);
+    CHECK(rig.reconnects() == 0.0);
+    out.housekeeping();
+    auto const lag = rig.metrics.gauge("mxl_decklink_reader_lag_grains", "", rig.labels()).value();
+    CHECK(lag >= 2.0); // still behind on purpose, as far as the rings allow
+    CHECK(lag <= 9.0);
     out.stop();
     audio.reset();
     video.reset();
