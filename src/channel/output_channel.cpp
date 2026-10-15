@@ -267,9 +267,67 @@ namespace mxldl::channel
             }
 
             reopenInvalidReaders();
+            if (_streamingUp.load() && !_streamProbed)
+            {
+                probeStreamTime();
+            }
             superviseStalls();
             waitForWork(std::chrono::milliseconds(100));
         }
+    }
+
+    void OutputChannel::probeStreamTime()
+    {
+        // Once per bring-up: how fine the card's playback clock is
+        // (GetScheduledStreamTime). Sampled for 1.5 frames on the supervisor
+        // thread, which owns _playback.
+        _streamProbed = true;
+        if (!_playback)
+        {
+            return;
+        }
+        std::vector<std::uint64_t> values;
+        auto const until = steadyNowNs() + _periodNs * 3 / 2;
+        while (steadyNowNs() < until)
+        {
+            if (auto const t = _playback->streamTimeNs())
+            {
+                if (values.empty() || values.back() != *t)
+                {
+                    values.push_back(*t);
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::microseconds(500));
+        }
+        if (values.empty())
+        {
+            log::info("stream_time_granularity",
+                {{"channel_index", _cfg.index}, {"channel_label", _cfg.label}, {"granularity", "unknown"}, {"details", "the card reports no playback position; the read deadline is estimated from the completion calls"}});
+            return;
+        }
+        std::uint64_t step = 0;
+        for (std::size_t i = 1; i < values.size(); ++i)
+        {
+            if (values[i] > values[i - 1])
+            {
+                auto const d = values[i] - values[i - 1];
+                step = step == 0 ? d : std::min(step, d);
+            }
+        }
+        // Whole frames: at most a couple of distinct values in 1.5 frames,
+        // a frame apart.
+        bool const whole = values.size() <= 3 && (step == 0 || step * 10 >= _periodNs * 9);
+        _streamWholeFrames.store(whole);
+        log::info("stream_time_granularity",
+            {
+                {"channel_index", _cfg.index},
+                {"channel_label", _cfg.label},
+                {"granularity", whole ? "whole_frames" : "sub_frame"},
+                {"step_us", step / 1000},
+                {"distinct_values", static_cast<std::uint64_t>(values.size())},
+                {"frame_us", _periodNs / 1000},
+                {"margin_us", _scheduleMarginNs / 1000},
+            });
     }
 
     void OutputChannel::waitForWork(std::chrono::milliseconds timeout)
@@ -295,6 +353,8 @@ namespace mxldl::channel
         }
         _videoLastHead = 0;
         _videoHeadChangeNs = 0;
+        _streamProbed = false;
+        _streamWholeFrames.store(false);
         _lateDegraded = false;
         _behindSinceNs = 0;
         _lateRunCount.store(0);
@@ -389,7 +449,17 @@ namespace mxldl::channel
             // CHx_SDI_LEVEL before the output is enabled (§7.1).
             {
                 auto const level = _subDevice.setSdiOutputLevel(_cfg.sdiLevel, _mode);
-                if (level.fallback)
+                if (level.partial)
+                {
+                    log::warn("sdi_level_partial",
+                        {
+                            {"channel_index", _cfg.index},
+                            {"channel_label", _cfg.label},
+                            {"requested", config::sdiLevelName(_cfg.sdiLevel)},
+                            {"details", level.details},
+                        });
+                }
+                else if (level.fallback)
                 {
                     log::warn("sdi_level_not_set",
                         {
@@ -492,7 +562,19 @@ namespace mxldl::channel
                     tearDownStreaming();
                     return false;
                 }
-                // Start at the first grain less the offset.
+                // Let the source write the preroll's grains and the read
+                // offset past its first one (first + offset + preroll), so
+                // the preroll starts at a grain the source has, shows only
+                // grains it has, and the offset is there from the start
+                // instead of building up through late repeats (slips).
+                auto const first = sourceHead;
+                auto const need = first + static_cast<std::uint64_t>(_readOffset) + preroll;
+                auto const offsetUntil = steadyNowNs() + (need - first + 3) * _periodNs;
+                while (sourceHead < need && _running.load() && steadyNowNs() < offsetUntil)
+                {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                    sourceHead = _videoReader->headIndex();
+                }
                 auto const now = ::mxlGetCurrentIndex(&rate);
                 start = now > behind ? now - behind : 0;
             }
@@ -649,6 +731,7 @@ namespace mxldl::channel
         playback.reset();
         videoReader.reset();
         audioFlows.clear();
+        _subDevice.releaseSdiOutputLevel();
     }
 
     bool OutputChannel::scheduleGrain(std::uint64_t grainIndex, std::uint64_t waitNs)
@@ -985,7 +1068,10 @@ namespace mxldl::channel
             }
             auto const now = steadyNowNs();
             auto const slack = shownAt > *stream + _scheduleMarginNs ? shownAt - *stream - _scheduleMarginNs : 0;
-            _readDeadlineNs = now + std::min(slack, _frameWaitNs);
+            auto const fromStream = now + std::min(slack, _frameWaitNs);
+            // A clock that steps in whole frames lags the real position by up
+            // to a frame: then the earlier of both estimates.
+            _readDeadlineNs = _streamWholeFrames.load() ? std::min(fromStream, _readDeadlineNs) : fromStream;
         }
         if (!scheduleGrain(idx, readBudgetNs()))
         {

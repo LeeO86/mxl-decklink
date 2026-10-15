@@ -104,6 +104,7 @@ namespace
         std::atomic<int> delayMs{0}; // the card holds the next completion this long
         std::atomic<int> deliveryLatencyUs{0}; // every completion call comes this late (a real card's latency)
         std::atomic<bool> reportStreamTime{true}; // the card reports its playback position
+        std::atomic<bool> streamWholeFrames{false}; // ... in whole frames only
 
         /// Median of audio block - video grain over the pairs from `from`:
         /// constant while audio and video stay in sync.
@@ -343,7 +344,9 @@ namespace
             {
                 return std::nullopt;
             }
-            return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - _start).count());
+            auto const t = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - _start).count());
+            auto const period = static_cast<std::uint64_t>(_period.count());
+            return _played->streamWholeFrames && period > 0 ? t / period * period : t;
         }
 
     private:
@@ -403,11 +406,27 @@ namespace
             r.applied = true;
             if (level == config::SdiLevel::A && mode.height <= 1080 && sdi.linkConfiguration != "single")
             {
-                sdi.linkConfiguration = "single";
-                r.linkChanged = true;
+                if (refuseSingleLink)
+                {
+                    r.partial = true;
+                    r.details = "SetInt(bmdDeckLinkConfigSDIOutputLinkConfiguration) refused";
+                }
+                else
+                {
+                    sdi.linkConfiguration = "single";
+                    r.linkChanged = true;
+                }
             }
             return r;
         }
+
+        void releaseSdiOutputLevel() override
+        {
+            ++releases;
+        }
+
+        bool refuseSingleLink = false;
+        int releases = 0;
 
         dl::SdiOutputConfig sdi; // what the fake card reports
         std::vector<config::SdiLevel> levelCalls;
@@ -1315,12 +1334,14 @@ TEST_CASE("CHx_SDI_LEVEL is set before the output starts and the effective level
         char const* expectedLevel;
         char const* expectedLink;
         char const* expectedLog;
+        bool refuseSingleLink = false;
     };
     // The card on small: Level B, dual link, Level A supported.
     for (auto const& c : {Case{config::SdiLevel::A, true, "A", "single", "sdi_level_set"},
                           Case{config::SdiLevel::B, true, "B", "dual", "sdi_level_set"},
                           Case{config::SdiLevel::Driver, true, "B", "dual", ""},
-                          Case{config::SdiLevel::A, false, "B", "dual", "sdi_level_not_set"}})
+                          Case{config::SdiLevel::A, false, "B", "dual", "sdi_level_not_set"},
+                          Case{config::SdiLevel::A, true, "A", "dual", "sdi_level_partial", true}})
     {
         CAPTURE(config::sdiLevelName(c.level));
         CAPTURE(c.supportsA);
@@ -1330,6 +1351,7 @@ TEST_CASE("CHx_SDI_LEVEL is set before the output starts and the effective level
         rig.sub->sdi.supportsSmpteLevelA = c.supportsA;
         rig.sub->sdi.output1080pAsPsF = false;
         rig.sub->sdi.linkConfiguration = "dual";
+        rig.sub->refuseSingleLink = c.refuseSingleLink;
         auto video = std::make_unique<VideoSource>(*rig.domain, rig.video, kGen1);
         std::this_thread::sleep_for(100ms);
         LogCapture logs;
@@ -1354,7 +1376,15 @@ TEST_CASE("CHx_SDI_LEVEL is set before the output starts and the effective level
         auto const lines = logs.of("sdi_output_config");
         REQUIRE(lines.size() == 1);
         CHECK(lines[0].find(std::string("\"smpte_level\":\"") + c.expectedLevel + "\"") != std::string::npos);
+        if (c.refuseSingleLink)
+        {
+            CHECK(logs.of("sdi_level_partial")[0].find("\"level\":\"warn\"") != std::string::npos);
+            CHECK(logs.of("sdi_level_set").empty());
+        }
+        // The configuration interface is held while the output plays.
+        CHECK(rig.sub->releases == 0);
         out.stop();
+        CHECK(rig.sub->releases >= 1);
         video.reset();
     }
     dl::SdiOutputConfig json;
@@ -1394,6 +1424,10 @@ TEST_CASE("an output comes up on an idle mirror whose first grain arrives 300 ms
         CHECK(rig.reconnects() == 0.0);
         REQUIRE(waitUntil([&] { return rig.played->pairCount() >= 30; }, 3s));
         CHECK(rig.played->avOffset(5) == -rig.ch.outputPrerollGrains);
+        // The offset was in place from the start: no late repeats built it.
+        CHECK(rig.counter("mxl_decklink_frames_repeated_total", "reason", "source_late") == 0.0);
+        out.housekeeping();
+        CHECK(rig.metrics.gauge("mxl_decklink_reader_lag_grains", "", rig.labels()).value() >= static_cast<double>(readOffset));
         out.stop();
         video.reset();
         audio.reset();
@@ -1417,4 +1451,29 @@ TEST_CASE("a grain the source marked invalid repeats the frame as source_invalid
     CHECK(rig.counter("mxl_decklink_frames_repeated_total", "reason", "read_error") == 0.0);
     out.stop();
     video.reset();
+}
+
+TEST_CASE("each bring-up logs how the card's playback clock steps")
+{
+    for (bool whole : {false, true})
+    {
+        CAPTURE(whole);
+        Rig rig(whole ? "clockwhole" : "clockfine");
+        rig.played->streamWholeFrames = whole;
+        auto video = std::make_unique<VideoSource>(*rig.domain, rig.video, kGen1);
+        std::this_thread::sleep_for(100ms);
+        LogCapture logs;
+        channel::OutputChannel out(rig.global, rig.ch, *rig.sub, *rig.domain, rig.metrics, "test");
+        out.start();
+        REQUIRE(waitUntil([&] { return !logs.of("stream_time_granularity").empty(); }, 3s));
+        auto const line = logs.of("stream_time_granularity")[0];
+        CHECK(line.find(whole ? "\"granularity\":\"whole_frames\"" : "\"granularity\":\"sub_frame\"") != std::string::npos);
+        // Either way the output plays on time.
+        auto const grains = out.status().grainsCommitted.load();
+        std::this_thread::sleep_for(500ms);
+        CHECK(out.status().grainsCommitted.load() - grains >= 20);
+        CHECK(rig.played->lateFrames() == 0);
+        out.stop();
+        video.reset();
+    }
 }

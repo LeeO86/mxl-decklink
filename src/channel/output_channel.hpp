@@ -100,6 +100,9 @@ namespace mxldl::channel
         /// for the same flow ids.
         void reopenInvalidReaders();
         void waitForWork(std::chrono::milliseconds timeout);
+        /// Supervisor: logs once per bring-up how the card's playback clock
+        /// steps (stream_time_granularity).
+        void probeStreamTime();
 
         // Source stalls (§2.4). Called with _callbackMutex held.
         void setVideoStalled(bool stalled);
@@ -172,6 +175,8 @@ namespace mxldl::channel
         std::uint64_t _scheduledFrames = 0;
         std::uint64_t _frameWaitNs = 0; // longest read wait in a completion callback
         std::uint64_t _scheduleMarginNs = 8'000'000ULL; // a frame is scheduled at least this long before it is shown
+        bool _streamProbed = false; // supervisor thread only
+        std::atomic<bool> _streamWholeFrames{false}; // the playback clock steps in whole frames
         // Read deadline of the completion callbacks (§2.4), _callbackMutex.
         std::uint64_t _lastCompletionNs = 0; // steady ns, estimated
         std::uint64_t _lastCallbackEndNs = 0; // when the previous completion callback returned

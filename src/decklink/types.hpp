@@ -134,6 +134,7 @@ namespace mxldl::dl
         bool applied = false; // the card took the requested level
         bool fallback = false; // not supported: the driver's setting stays
         bool linkChanged = false; // the SDI output link configuration was set to single link
+        bool partial = false; // the level was set, the single link was refused
         std::string details;
     };
 

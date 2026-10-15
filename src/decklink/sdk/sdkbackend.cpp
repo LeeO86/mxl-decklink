@@ -798,6 +798,7 @@ namespace mxldl::dl
                     r.details = "the card has no IDeckLinkConfiguration; the driver's setting stays";
                     return r;
                 }
+                _sdiConfig = config; // kept until releaseSdiOutputLevel()
                 if (level == config::SdiLevel::A)
                 {
                     bool supports = false;
@@ -830,11 +831,17 @@ namespace mxldl::dl
                         }
                         else
                         {
+                            r.partial = true;
                             r.details = hresultMessage("SetInt(bmdDeckLinkConfigSDIOutputLinkConfiguration, single link)", hr);
                         }
                     }
                 }
                 return r;
+            }
+
+            void releaseSdiOutputLevel() override
+            {
+                _sdiConfig = ComPtr<IDeckLinkConfiguration>();
             }
 
             SubDeviceStatus status() override
@@ -952,6 +959,10 @@ namespace mxldl::dl
         private:
             ComPtr<IDeckLink> _device;
             SubDeviceInfo _info;
+            /// Held while the output plays: the SDK may drop configuration
+            /// changes when the last reference to the interface goes. Not
+            /// written to the preferences (that would apply to every app).
+            ComPtr<IDeckLinkConfiguration> _sdiConfig;
         };
 
         class SdkCard final

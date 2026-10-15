@@ -112,6 +112,8 @@ namespace mxldl::dl
             r.details = "this backend cannot set the SDI level; the driver's setting stays";
             return r;
         }
+        /// The output stopped: let go of what setSdiOutputLevel holds.
+        virtual void releaseSdiOutputLevel() {}
     };
 
     /// Events raised by the card outside stream callbacks.
