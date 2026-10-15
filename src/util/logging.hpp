@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <initializer_list>
 #include <string>
 #include <string_view>
@@ -78,6 +79,9 @@ namespace mxldl::log
     void info(std::string_view event, std::initializer_list<Field> fields = {});
     void warn(std::string_view event, std::initializer_list<Field> fields = {});
     void error(std::string_view event, std::initializer_list<Field> fields = {});
+
+    /// Tests: also hand every written line to `sink` (empty function: off).
+    void setSink(std::function<void(std::string const& line)> sink);
 
     /// JSON string escaping helper (exposed for /statusz JSON rendering too).
     std::string jsonEscape(std::string_view s);

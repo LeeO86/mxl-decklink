@@ -8,6 +8,8 @@
 #include <mutex>
 #include <string>
 
+#include "decklink/types.hpp"
+
 namespace mxldl::channel
 {
     enum class State : int
@@ -45,6 +47,8 @@ namespace mxldl::channel
         /// Outputs: frames that repeated the last frame because no new grain
         /// could be read (source stall, flow re-open, read error).
         std::atomic<std::uint64_t> framesRepeated{0};
+        /// Outputs: CHx_READ_OFFSET_GRAINS in effect (capped at bring-up).
+        std::atomic<int> readOffsetGrains{0};
         std::atomic<std::uint64_t> reconnects{0};
         std::atomic<std::uint64_t> grainsCommitted{0};
         /// Output only: DeckLink `GetBufferedAudioSampleFrameCount` (sample
@@ -81,8 +85,22 @@ namespace mxldl::channel
             _activeModeName = std::move(name);
         }
 
+        /// Outputs: the card's SDI output signalling, read at bring-up.
+        dl::SdiOutputConfig sdiOutput() const
+        {
+            std::lock_guard const lock{_stringMutex};
+            return _sdiOutput;
+        }
+
+        void setSdiOutput(dl::SdiOutputConfig c)
+        {
+            std::lock_guard const lock{_stringMutex};
+            _sdiOutput = std::move(c);
+        }
+
     private:
         mutable std::mutex _stringMutex;
+        dl::SdiOutputConfig _sdiOutput;
         std::string _activeVideoFlowId;
         std::string _activeModeName;
     };

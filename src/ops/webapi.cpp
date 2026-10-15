@@ -292,7 +292,7 @@ namespace mxldl::ops
                 << ",\"state\":" << jstr(channel::stateName(v.state)) << ",\"signal_locked\":" << (v.signalLocked ? "true" : "false")
                 << ",\"active_video_mode\":" << jstr(v.activeModeName) << ",\"video_mode_setting\":" << jstr(v.cfg.videoModeName)
                 << ",\"active_video_flow_id\":" << jstr(v.activeVideoFlowId) << ",\"frames_total\":" << v.framesTotal
-                << ",\"frames_dropped\":" << v.framesDropped << ",\"frames_repeated\":" << v.framesRepeated << ",\"reconnects\":" << v.reconnects << ",\"grains_committed\":" << v.grainsCommitted
+                << ",\"frames_dropped\":" << v.framesDropped << ",\"frames_repeated\":" << v.framesRepeated << ",\"read_offset_grains\":" << v.readOffsetGrains << ",\"reconnects\":" << v.reconnects << ",\"grains_committed\":" << v.grainsCommitted
                 << ",\"last_frame_tai_ns\":" << v.lastFrameTaiNs;
             appendAudioJson(out, v, &flowById);
             out << "}";
@@ -329,7 +329,8 @@ namespace mxldl::ops
                 << ",\"reference_locked\":" << (status.referenceLocked ? "true" : "false")
                 << ",\"capture_busy\":" << (status.captureBusy ? "true" : "false")
                 << ",\"playback_busy\":" << (status.playbackBusy ? "true" : "false") << ",\"pcie_link_width\":" << jnum(status.pcieLinkWidth)
-                << ",\"pcie_link_speed\":" << jnum(status.pcieLinkSpeed) << ",\"temperature_c\":" << jnum(status.temperatureC) << "}}";
+                << ",\"pcie_link_speed\":" << jnum(status.pcieLinkSpeed) << ",\"temperature_c\":" << jnum(status.temperatureC)
+                << ",\"sdi_output\":" << dl::sdiOutputJson(status.sdiOutput) << "}}";
         }
         out << "]}";
         return jsonResponse(200, out.str());

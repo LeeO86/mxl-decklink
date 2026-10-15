@@ -27,6 +27,7 @@
 #include "mxlbridge/domain.hpp"
 #include "mxlbridge/videowriter.hpp"
 #include "ops/metrics.hpp"
+#include "util/logging.hpp"
 
 using namespace mxldl;
 namespace fs = std::filesystem;
@@ -364,8 +365,12 @@ namespace
 
         dl::SubDeviceStatus status() override
         {
-            return {};
+            dl::SubDeviceStatus st;
+            st.sdiOutput = sdi;
+            return st;
         }
+
+        dl::SdiOutputConfig sdi; // what the fake card reports
 
         std::unique_ptr<dl::ICaptureSession> openCapture() override
         {
@@ -412,13 +417,28 @@ namespace
     class VideoSource
     {
     public:
-        VideoSource(mxlbridge::Domain& domain, mxlbridge::VideoFlowParams const& p, std::uint8_t fill)
-            : _writer(domain, p, 1)
+        /// `invalidFirst`: the first grains it writes are marked invalid.
+        VideoSource(mxlbridge::Domain& domain, mxlbridge::VideoFlowParams const& p, std::uint8_t fill, bool startPaused = false, int invalidFirst = 0)
+            : paused(startPaused)
+            , _invalidLeft(invalidFirst)
+            , _writer(domain, p, 1)
             , _frame(_writer.grainPayloadSize() > 0 ? _writer.grainPayloadSize() : 1, fill)
             , _pump([this] {
                 if (paused)
                 {
                     return; // the flow stays, no new grains: a source stall
+                }
+                if (auto const step = stepMs.load(); step > 0)
+                {
+                    // A source slower than real time: the next grain every
+                    // `step` ms, whatever the time says.
+                    auto const t = std::chrono::steady_clock::now();
+                    if (t >= _nextStep)
+                    {
+                        _nextStep = t + std::chrono::milliseconds(step);
+                        put(_last + 1);
+                    }
+                    return;
                 }
                 auto const rate = _writer.grainRate();
                 // `offset` grains behind the current time; a larger offset
@@ -426,23 +446,55 @@ namespace
                 auto const index = ::mxlGetCurrentIndex(&rate) - offset.load();
                 if (index > _last)
                 {
-                    _last = index;
-                    if (_frame.size() >= kStampAt + sizeof index)
-                    {
-                        std::memcpy(_frame.data() + kStampAt, &index, sizeof index);
-                    }
-                    (void)_writer.writeFrame(index, _frame.data(), _frame.size());
+                    put(index);
                 }
             })
         {}
 
         std::atomic<bool> paused{false};
         std::atomic<std::uint64_t> offset{0}; // source latency in grains
+        std::atomic<int> stepMs{0}; // > 0: one grain every stepMs, slower than real time
+        /// The newest grain has only half its slices until the next one is
+        /// written (a writer that commits slice by slice).
+        std::atomic<bool> partialNewest{false};
 
     private:
+        void put(std::uint64_t index)
+        {
+            if (_frame.size() >= kStampAt + sizeof index)
+            {
+                std::memcpy(_frame.data() + kStampAt, &index, sizeof index);
+            }
+            if (_invalidLeft > 0)
+            {
+                --_invalidLeft;
+                (void)_writer.writeInvalid(index);
+            }
+            else if (partialNewest)
+            {
+                if (_last != 0 && _lastPartial)
+                {
+                    std::memcpy(_frame.data() + kStampAt, &_last, sizeof _last);
+                    (void)_writer.writeFrame(_last, _frame.data(), _frame.size());
+                    std::memcpy(_frame.data() + kStampAt, &index, sizeof index);
+                }
+                (void)_writer.writePartial(index, _frame.data(), _frame.size(), 1);
+                _lastPartial = true;
+            }
+            else
+            {
+                (void)_writer.writeFrame(index, _frame.data(), _frame.size());
+                _lastPartial = false;
+            }
+            _last = index;
+        }
+
+        int _invalidLeft = 0;
+        bool _lastPartial = false;
         mxlbridge::VideoWriter _writer;
         std::vector<std::uint8_t> _frame;
         std::uint64_t _last = 0;
+        std::chrono::steady_clock::time_point _nextStep{};
         Pump _pump; // last: stops before the writer goes
     };
 
@@ -602,6 +654,43 @@ namespace
                 {"subdevice_index", "0"},
             };
         }
+    };
+
+    /// Collects the log lines written while it lives.
+    class LogCapture
+    {
+    public:
+        LogCapture()
+        {
+            log::setSink([this](std::string const& line) {
+                std::lock_guard const lock{_mutex};
+                _lines.push_back(line);
+            });
+        }
+
+        ~LogCapture()
+        {
+            log::setSink({});
+        }
+
+        /// Lines of event `name`.
+        std::vector<std::string> of(std::string const& name)
+        {
+            std::lock_guard const lock{_mutex};
+            std::vector<std::string> out;
+            for (auto const& line : _lines)
+            {
+                if (line.find("\"event\":\"" + name + "\"") != std::string::npos)
+                {
+                    out.push_back(line);
+                }
+            }
+            return out;
+        }
+
+    private:
+        std::mutex _mutex;
+        std::vector<std::string> _lines;
     };
 
     bool waitUntil(std::function<bool()> const& done, std::chrono::milliseconds limit)
@@ -961,9 +1050,18 @@ TEST_CASE("CHx_READ_OFFSET_GRAINS beyond the flows' history is capped")
     std::this_thread::sleep_for(300ms);
     rig.ch.readOffsetGrains = 64;
 
+    LogCapture logs;
     channel::OutputChannel out(rig.global, rig.ch, *rig.sub, *rig.domain, rig.metrics, "test");
     out.start();
     REQUIRE(waitUntil([&] { return out.status().state.load() == channel::State::Healthy; }, 3s));
+    // Visible: /api/status, the gauge and the log of every bring-up.
+    CHECK(out.status().readOffsetGrains.load() == 4);
+    CHECK(rig.metrics.gauge("mxl_decklink_read_offset_grains", "", rig.labels()).value() == 4.0);
+    auto const applied = logs.of("read_offset_applied");
+    REQUIRE(applied.size() == 1);
+    CHECK(applied[0].find("\"requested\":64") != std::string::npos);
+    CHECK(applied[0].find("\"effective\":4") != std::string::npos);
+    CHECK(logs.of("read_offset_capped").size() == 1);
     auto const grains = out.status().grainsCommitted.load();
     auto const sound = rig.played->soundBlocks();
     std::this_thread::sleep_for(1000ms);
@@ -977,5 +1075,205 @@ TEST_CASE("CHx_READ_OFFSET_GRAINS beyond the flows' history is capped")
     CHECK(lag <= 9.0);
     out.stop();
     audio.reset();
+    video.reset();
+}
+
+TEST_CASE("an output comes up at once on a new source that is two grains late (a mirror created by the route)")
+{
+    // The preroll used to ask for grains the new mirror never had: the
+    // bring-up failed (preroll_grain_unavailable) and retried for 1.6 s.
+    for (int readOffset : {0, 2})
+    {
+        CAPTURE(readOffset);
+        Rig rig(readOffset == 0 ? "fresh0" : "fresh2");
+        rig.withAudio();
+        rig.ch.readOffsetGrains = readOffset;
+        LogCapture logs;
+        auto video = std::make_unique<VideoSource>(*rig.domain, rig.video, kGen1);
+        video->offset = 2;
+        auto audio = std::make_unique<AudioSource>(*rig.domain, rig.audio, 0x10000000);
+        std::this_thread::sleep_for(5ms);
+
+        channel::OutputChannel out(rig.global, rig.ch, *rig.sub, *rig.domain, rig.metrics, "test");
+        auto const started = std::chrono::steady_clock::now();
+        out.start();
+        REQUIRE(waitUntil([&] { return out.status().state.load() == channel::State::Healthy; }, 3s));
+        CHECK(std::chrono::steady_clock::now() - started < 400ms);
+        CHECK(logs.of("preroll_grain_unavailable").empty());
+        CHECK(logs.of("channel_bringup_failed").empty());
+        CHECK(rig.reconnects() == 0.0);
+        CHECK(out.status().readOffsetGrains.load() == readOffset);
+        auto const grains = out.status().grainsCommitted.load();
+        std::this_thread::sleep_for(500ms);
+        CHECK(out.status().grainsCommitted.load() - grains >= 20);
+        CHECK(rig.played->soundBlocks() >= 20);
+        out.stop();
+        audio.reset();
+        video.reset();
+    }
+}
+
+TEST_CASE("short stalls, late runs and catch-ups are logged")
+{
+    Rig rig("logs");
+    LogCapture logs;
+    auto video = std::make_unique<VideoSource>(*rig.domain, rig.video, kGen1);
+    std::this_thread::sleep_for(200ms);
+    channel::OutputChannel out(rig.global, rig.ch, *rig.sub, *rig.domain, rig.metrics, "test");
+    out.start();
+    REQUIRE(waitUntil([&] { return out.status().state.load() == channel::State::Healthy; }, 3s));
+    REQUIRE(waitUntil([&] { return out.status().grainsCommitted.load() >= 10; }, 2s));
+
+    // A 150 ms stall: below the 200 ms of the source_stall warning, but its
+    // end is logged with the frames it repeated.
+    video->paused = true;
+    std::this_thread::sleep_for(150ms);
+    video->paused = false;
+    REQUIRE(waitUntil([&] { return !logs.of("source_stall_ended").empty(); }, 2s));
+    auto const ended = logs.of("source_stall_ended")[0];
+    CHECK(ended.find("\"stalls\":1") != std::string::npos);
+    CHECK(ended.find("\"frames_repeated\":0") == std::string::npos);
+    CHECK(rig.counter("mxl_decklink_frames_repeated_total", "reason", "source_stall") >= 3.0);
+
+    // A source slower than real time (one grain every 30 ms) is late frame
+    // after frame: the run is logged when it starts and when it ends.
+    video->stepMs = 30;
+    REQUIRE(waitUntil([&] { return !logs.of("source_late").empty(); }, 2s));
+    CHECK(logs.of("source_late")[0].find("slip") != std::string::npos);
+    std::this_thread::sleep_for(400ms);
+    // Back to real time, ahead of the slipped read position: the run ends,
+    // and a second later the read position catches up.
+    video->stepMs = 0;
+    REQUIRE(waitUntil([&] { return !logs.of("source_late_ended").empty(); }, 2s));
+    REQUIRE(waitUntil([&] { return !logs.of("read_position_caught_up").empty(); }, 3s));
+    CHECK(logs.of("read_position_caught_up")[0].find("skipped_grains") != std::string::npos);
+    // After the stall and after the jump the output went straight to the
+    // source's newest grain: no gap grain was read, nothing shown late.
+    CHECK(logs.of("grain_read_error").empty());
+    CHECK(rig.counter("mxl_decklink_frames_repeated_total", "reason", "read_error") == 0.0);
+    CHECK(logs.of("output_frames_lost").empty());
+    CHECK(rig.played->lateFrames() <= 1);
+    CHECK(rig.reconnects() == 0.0);
+    out.stop();
+    video.reset();
+}
+
+TEST_CASE("audio starts with the frame the preroll shows: a new mirror without grains, invalid first grains")
+{
+    // The preroll may jump to the source's newest grain (a mirror the route
+    // created, whose first grain lands during the preroll) or pass over
+    // grains its writer marked invalid. The audio must start at the grain
+    // shown, not where the preroll began.
+    for (int scenario = 0; scenario < 2; ++scenario)
+    {
+        CAPTURE(scenario);
+        Rig rig(scenario == 0 ? "prerollsync0" : "prerollsync1");
+        rig.withAudio();
+        auto audio = std::make_unique<AudioSource>(*rig.domain, rig.audio, kStamped);
+        std::unique_ptr<VideoSource> video;
+        if (scenario == 0)
+        {
+            video = std::make_unique<VideoSource>(*rig.domain, rig.video, kGen1, true); // no grain yet
+        }
+        else
+        {
+            video = std::make_unique<VideoSource>(*rig.domain, rig.video, kGen1, false, 3);
+            std::this_thread::sleep_for(30ms);
+        }
+        channel::OutputChannel out(rig.global, rig.ch, *rig.sub, *rig.domain, rig.metrics, "test");
+        out.start();
+        if (scenario == 0)
+        {
+            std::this_thread::sleep_for(80ms);
+            video->paused = false; // the first grain lands during the preroll
+        }
+        REQUIRE(waitUntil([&] { return out.status().state.load() == channel::State::Healthy; }, 3s));
+        REQUIRE(waitUntil([&] { return rig.played->pairCount() >= 30; }, 3s));
+        // Audio block - video grain as on a normal start: -(preroll).
+        CHECK(rig.played->avOffset(5) == -rig.ch.outputPrerollGrains);
+        out.stop();
+        audio.reset();
+        video.reset();
+    }
+}
+
+TEST_CASE("a new session does not repeat the previous session's picture")
+{
+    Rig rig("lastframe");
+    auto first = std::make_unique<VideoSource>(*rig.domain, rig.video, kGen1);
+    std::this_thread::sleep_for(200ms);
+    LogCapture logs;
+    channel::OutputChannel out(rig.global, rig.ch, *rig.sub, *rig.domain, rig.metrics, "test");
+    out.start();
+    REQUIRE(waitUntil([&] { return rig.played->countSince(0, kGen1) >= 10; }, 3s));
+    out.stop();
+
+    // The writer goes; a new one creates the flow again but writes nothing
+    // yet. The new session has nothing to show: it must not show the old
+    // session's last frame, but wait and retry.
+    first.reset();
+    auto second = std::make_unique<VideoSource>(*rig.domain, rig.video, kGen2, true);
+    auto const from = rig.played->frameCount();
+    out.start();
+    REQUIRE(waitUntil([&] { return !logs.of("preroll_grain_unavailable").empty(); }, 3s));
+    CHECK(rig.played->countSince(from, kGen1) == 0);
+    CHECK(out.status().state.load() != channel::State::Healthy);
+    second->paused = false;
+    CHECK(waitUntil([&] { return rig.played->countSince(from, kGen2) >= 10; }, 5s));
+    CHECK(rig.played->countSince(from, kGen1) == 0);
+    out.stop();
+    second.reset();
+}
+
+TEST_CASE("a read out of the history moves on when the newest grain is still being written")
+{
+    // A writer that commits slice by slice: its newest grain is never
+    // complete. A source that jumps far ahead (after running slower than
+    // real time) leaves the read out of the history; reading its newest
+    // grain then fails, but the read position must still move on.
+    Rig rig("partial");
+    auto video = std::make_unique<VideoSource>(*rig.domain, rig.video, kGen1);
+    video->partialNewest = true;
+    std::this_thread::sleep_for(200ms);
+    channel::OutputChannel out(rig.global, rig.ch, *rig.sub, *rig.domain, rig.metrics, "test");
+    out.start();
+    REQUIRE(waitUntil([&] { return out.status().state.load() == channel::State::Healthy; }, 3s));
+    REQUIRE(waitUntil([&] { return out.status().grainsCommitted.load() >= 20; }, 2s));
+
+    video->stepMs = 30;
+    std::this_thread::sleep_for(600ms);
+    video->stepMs = 0; // jumps to the current time, 10+ grains ahead
+    std::this_thread::sleep_for(300ms);
+    auto const grains = out.status().grainsCommitted.load();
+    auto const errors = rig.counter("mxl_decklink_frames_repeated_total", "reason", "read_error");
+    std::this_thread::sleep_for(1000ms);
+    CHECK(out.status().grainsCommitted.load() - grains >= 40);
+    CHECK(rig.counter("mxl_decklink_frames_repeated_total", "reason", "read_error") - errors <= 2.0);
+    out.stop();
+    video.reset();
+}
+
+TEST_CASE("an output reports the card's SDI output level at bring-up (read only)")
+{
+    Rig rig("sdilevel");
+    rig.sub->sdi.smpteLevelA = false; // the driver default on small: Level B
+    rig.sub->sdi.supportsSmpteLevelA = true;
+    rig.sub->sdi.output1080pAsPsF = false;
+    rig.sub->sdi.linkConfiguration = "single";
+    auto video = std::make_unique<VideoSource>(*rig.domain, rig.video, kGen1);
+    std::this_thread::sleep_for(200ms);
+    LogCapture logs;
+    channel::OutputChannel out(rig.global, rig.ch, *rig.sub, *rig.domain, rig.metrics, "test");
+    out.start();
+    REQUIRE(waitUntil([&] { return out.status().state.load() == channel::State::Healthy; }, 3s));
+    CHECK(out.status().sdiOutput() == rig.sub->sdi);
+    auto const lines = logs.of("sdi_output_config");
+    REQUIRE(lines.size() == 1);
+    CHECK(lines[0].find("\"smpte_level\":\"B\"") != std::string::npos);
+    CHECK(lines[0].find("\"link_configuration\":\"single\"") != std::string::npos);
+    CHECK(dl::sdiOutputJson(rig.sub->sdi) ==
+          "{\"smpte_level\":\"B\",\"supports_smpte_level_a\":true,\"output_1080p_as_psf\":false,\"link_configuration\":\"single\"}");
+    CHECK(dl::sdiOutputJson({}) == "{\"smpte_level\":null,\"supports_smpte_level_a\":null,\"output_1080p_as_psf\":null,\"link_configuration\":null}");
+    out.stop();
     video.reset();
 }

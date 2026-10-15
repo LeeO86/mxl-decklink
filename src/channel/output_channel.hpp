@@ -107,6 +107,8 @@ namespace mxldl::channel
         /// wrote nothing during the wait are stalled.
         void markStalledAudio();
         void updateStallClock();
+        /// A late repeat: counts it into the current run of late grains.
+        void noteLate(std::uint64_t nowNs);
         /// Records when a reader's head index last changed.
         static void noteHead(std::uint64_t head, std::uint64_t nowNs, std::uint64_t& lastHead, std::uint64_t& changedNs);
         /// Grains to skip ahead after reading `grainIndex` with the source's
@@ -115,6 +117,11 @@ namespace mxldl::channel
         [[nodiscard]] std::int64_t catchUp(std::uint64_t grainIndex, std::uint64_t head, bool now);
         /// Bring-up: CHx_READ_OFFSET_GRAINS within the flows' history.
         void capReadOffset(std::uint64_t preroll);
+        /// The source jumped ahead of the read position (it resumed after a
+        /// stall, or the read fell out of its history): read its newest grain
+        /// (less the read offset) into `grain`/`status` and return the grains
+        /// skipped; 0 when there is nothing newer to read.
+        [[nodiscard]] std::int64_t resumeAt(std::uint64_t grainIndex, std::uint64_t head, mxlbridge::VideoReader::Grain& grain, mxlStatus& status);
         /// Supervisor thread: logs stall start/end and keeps the channel
         /// `degraded` while a stall lasts longer than 1 s.
         void superviseStalls();
@@ -165,7 +172,7 @@ namespace mxldl::channel
         std::uint64_t _frameWaitNs = 0; // longest read wait in a completion callback
         // Read deadline of the completion callbacks (§2.4), _callbackMutex.
         std::uint64_t _lastCompletionNs = 0; // steady ns, estimated
-        std::uint64_t _lastCallbackNs = 0; // duration of the previous completion callback
+        std::uint64_t _lastCallbackEndNs = 0; // when the previous completion callback returned
         std::uint64_t _readDeadlineNs = 0; // 0 = no frame completed yet
         std::vector<std::uint8_t> _lastFrame; // repeated when no grain can be read
         // Int32-aligned PCM scratch (DeckLink sample type is usually 32-bit;
@@ -199,14 +206,43 @@ namespace mxldl::channel
         std::uint64_t _periodNs = 20'000'000ULL; // frame period, set at bring-up
         int _readOffset = 0; // CHx_READ_OFFSET_GRAINS, capped at bring-up
         std::uint64_t _behindSinceNs = 0; // catch-up condition held since (steady ns), _callbackMutex
-        std::atomic<std::uint64_t> _lateSinceNs{0}; // steady ns of the first source_late in a row; 0 = none
         bool _lateDegraded = false; // supervisor thread only
         std::atomic<std::uint64_t> _stallRepeatsAtStart{0};
-        std::atomic<std::uint64_t> _lastStallRepeats{0}; // source_stall repeats of the last finished stall
+        std::atomic<std::uint64_t> _stallsEnded{0};
+        std::atomic<std::uint64_t> _endedStallRepeats{0}; // source_stall repeats of all finished stalls
+        std::uint64_t _stallsEndedLogged = 0; // supervisor thread only
+        std::uint64_t _endedStallRepeatsLogged = 0; // supervisor thread only
+        std::uint64_t _stallEndLogNs = 0; // supervisor thread only
+
+        // Late runs, catch-ups, read errors and lost frames, for the
+        // supervisor's log lines (§7.4). Counters written by the callbacks.
+        std::atomic<std::uint64_t> _lateRunId{0};
+        std::atomic<std::uint64_t> _lateRunCount{0}; // late repeats in the current run
+        std::atomic<std::uint64_t> _prevLateRunCount{0};
+        std::atomic<std::uint64_t> _lateRunStartNs{0};
+        std::atomic<std::uint64_t> _lateSinceNs{0}; // first late repeat since the last grain read in time; 0 = none
+        std::atomic<std::uint64_t> _lateLastNs{0}; // steady ns of the last late repeat
+        std::atomic<std::uint64_t> _catchUps{0};
+        std::atomic<std::uint64_t> _catchUpGrains{0};
+        std::atomic<bool> _lastCatchUpOutOfRing{false};
+        std::atomic<std::uint64_t> _readErrors{0};
+        std::atomic<int> _lastReadError{0};
+        std::atomic<std::uint64_t> _cardLate{0};
+        std::atomic<std::uint64_t> _cardDropped{0};
+        std::atomic<std::uint64_t> _notScheduled{0};
+        std::uint64_t _lateRunStartLogged = 0; // supervisor thread only, as the rest
+        std::uint64_t _lateRunEndLogged = 0;
+        std::uint64_t _catchUpsLogged = 0;
+        std::uint64_t _catchUpGrainsLogged = 0;
+        std::uint64_t _catchUpLogNs = 0;
+        std::uint64_t _readErrorsLogged = 0;
+        std::uint64_t _readErrorLogNs = 0;
+        std::uint64_t _cardLateLogged = 0;
+        std::uint64_t _cardDroppedLogged = 0;
+        std::uint64_t _notScheduledLogged = 0;
+        std::uint64_t _cardLogNs = 0;
         std::atomic<std::uint64_t> _stallSinceNs{0}; // steady ns; 0 = no reader stalled
-        std::atomic<std::uint64_t> _stallEvents{0};
         std::atomic<std::uint64_t> _lastStallNs{0}; // duration of the last finished stall
-        std::uint64_t _stallEventsLogged = 0; // supervisor thread only
         bool _stallLogged = false; // supervisor thread only
         bool _stallDegraded = false; // supervisor thread only
 
@@ -225,6 +261,7 @@ namespace mxldl::channel
         ops::Gauge* _bufferedVideoGauge = nullptr;
         ops::Gauge* _bufferedAudioGauge = nullptr;
         ops::Gauge* _readerLagGauge = nullptr;
+        ops::Gauge* _readOffsetGauge = nullptr;
 
         void setState(State s);
     };
