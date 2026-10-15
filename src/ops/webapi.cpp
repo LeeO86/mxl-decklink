@@ -329,7 +329,8 @@ namespace mxldl::ops
                 << ",\"reference_locked\":" << (status.referenceLocked ? "true" : "false")
                 << ",\"capture_busy\":" << (status.captureBusy ? "true" : "false")
                 << ",\"playback_busy\":" << (status.playbackBusy ? "true" : "false") << ",\"pcie_link_width\":" << jnum(status.pcieLinkWidth)
-                << ",\"pcie_link_speed\":" << jnum(status.pcieLinkSpeed) << ",\"temperature_c\":" << jnum(status.temperatureC) << "}}";
+                << ",\"pcie_link_speed\":" << jnum(status.pcieLinkSpeed) << ",\"temperature_c\":" << jnum(status.temperatureC)
+                << ",\"sdi_output\":" << dl::sdiOutputJson(status.sdiOutput) << "}}";
         }
         out << "]}";
         return jsonResponse(200, out.str());

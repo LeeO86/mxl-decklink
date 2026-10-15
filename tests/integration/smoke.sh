@@ -367,6 +367,12 @@ assert a['flows'][0].get('mxl_present') is True, a
 detected=$(webapi /api/card | python3 -c "import json,sys; print(json.load(sys.stdin)['subdevices'][0]['status']['detected_input_mode'])") || detected=err
 [[ "$detected" == "HD720p50" ]] || fail "web /api/card detected input mode: $detected"
 
+# The card's SDI output signalling is reported (read only; the mock reports Level B).
+level=$(webapi /api/card | python3 -c "import json,sys; print(json.load(sys.stdin)['subdevices'][0]['status']['sdi_output']['smpte_level'])") || level=err
+[[ "$level" == "B" ]] || fail "web /api/card sdi_output.smpte_level: $level"
+sdi_out=$(statusz_field smoke-out sdi_output) || sdi_out=err
+[[ "$sdi_out" == *"'smpte_level': 'B'"* ]] || fail "/statusz sdi_output of the output: $sdi_out"
+
 # Domain scan sees the current domain; flow browser lists CH0's flows.
 webapi /api/domains | python3 -c "
 import json,sys

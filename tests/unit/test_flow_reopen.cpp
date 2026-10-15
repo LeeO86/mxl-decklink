@@ -365,8 +365,12 @@ namespace
 
         dl::SubDeviceStatus status() override
         {
-            return {};
+            dl::SubDeviceStatus st;
+            st.sdiOutput = sdi;
+            return st;
         }
+
+        dl::SdiOutputConfig sdi; // what the fake card reports
 
         std::unique_ptr<dl::ICaptureSession> openCapture() override
         {
@@ -1245,6 +1249,31 @@ TEST_CASE("a read out of the history moves on when the newest grain is still bei
     std::this_thread::sleep_for(1000ms);
     CHECK(out.status().grainsCommitted.load() - grains >= 40);
     CHECK(rig.counter("mxl_decklink_frames_repeated_total", "reason", "read_error") - errors <= 2.0);
+    out.stop();
+    video.reset();
+}
+
+TEST_CASE("an output reports the card's SDI output level at bring-up (read only)")
+{
+    Rig rig("sdilevel");
+    rig.sub->sdi.smpteLevelA = false; // the driver default on small: Level B
+    rig.sub->sdi.supportsSmpteLevelA = true;
+    rig.sub->sdi.output1080pAsPsF = false;
+    rig.sub->sdi.linkConfiguration = "single";
+    auto video = std::make_unique<VideoSource>(*rig.domain, rig.video, kGen1);
+    std::this_thread::sleep_for(200ms);
+    LogCapture logs;
+    channel::OutputChannel out(rig.global, rig.ch, *rig.sub, *rig.domain, rig.metrics, "test");
+    out.start();
+    REQUIRE(waitUntil([&] { return out.status().state.load() == channel::State::Healthy; }, 3s));
+    CHECK(out.status().sdiOutput() == rig.sub->sdi);
+    auto const lines = logs.of("sdi_output_config");
+    REQUIRE(lines.size() == 1);
+    CHECK(lines[0].find("\"smpte_level\":\"B\"") != std::string::npos);
+    CHECK(lines[0].find("\"link_configuration\":\"single\"") != std::string::npos);
+    CHECK(dl::sdiOutputJson(rig.sub->sdi) ==
+          "{\"smpte_level\":\"B\",\"supports_smpte_level_a\":true,\"output_1080p_as_psf\":false,\"link_configuration\":\"single\"}");
+    CHECK(dl::sdiOutputJson({}) == "{\"smpte_level\":null,\"supports_smpte_level_a\":null,\"output_1080p_as_psf\":null,\"link_configuration\":null}");
     out.stop();
     video.reset();
 }

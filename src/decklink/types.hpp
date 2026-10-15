@@ -85,6 +85,42 @@ namespace mxldl::dl
         bool hasProfileManager = false;
     };
 
+    /// How the card signals its SDI output, as configured in the driver
+    /// (read-only: this process never sets it; §3.3). Unset when the card
+    /// does not report it.
+    struct SdiOutputConfig
+    {
+        /// bmdDeckLinkConfigSMPTELevelAOutput: true = 3G-SDI Level A, false =
+        /// Level B (some receivers show 1080p50 Level B as 1080i50).
+        std::optional<bool> smpteLevelA;
+        std::optional<bool> supportsSmpteLevelA; // BMDDeckLinkSupportsSMPTELevelAOutput
+        std::optional<bool> output1080pAsPsF; // bmdDeckLinkConfigOutput1080pAsPsF
+        std::optional<std::string> linkConfiguration; // bmdDeckLinkConfigSDIOutputLinkConfiguration: single, dual, quad
+
+        bool operator==(SdiOutputConfig const&) const = default;
+    };
+
+    /// "A", "B" or "unknown".
+    inline char const* smpteLevelName(SdiOutputConfig const& c)
+    {
+        return !c.smpteLevelA ? "unknown" : (*c.smpteLevelA ? "A" : "B");
+    }
+
+    /// JSON object for /api/card and /statusz.
+    inline std::string sdiOutputJson(SdiOutputConfig const& c)
+    {
+        auto const flag = [](std::optional<bool> const& v) {
+            return v ? std::string(*v ? "true" : "false") : std::string("null");
+        };
+        std::string out = "{\"smpte_level\":";
+        out += c.smpteLevelA ? std::string("\"") + smpteLevelName(c) + "\"" : std::string("null");
+        out += ",\"supports_smpte_level_a\":" + flag(c.supportsSmpteLevelA);
+        out += ",\"output_1080p_as_psf\":" + flag(c.output1080pAsPsF);
+        out += ",\"link_configuration\":" + (c.linkConfiguration ? "\"" + *c.linkConfiguration + "\"" : std::string("null"));
+        out += "}";
+        return out;
+    }
+
     /// Live per-sub-device status from the DeckLink SDK (§7.5 Card tab).
     struct SubDeviceStatus
     {
@@ -100,5 +136,6 @@ namespace mxldl::dl
         std::optional<std::int64_t> pcieLinkWidth;
         std::optional<std::int64_t> pcieLinkSpeed; // generation
         std::optional<double> temperatureC;
+        SdiOutputConfig sdiOutput;
     };
 }

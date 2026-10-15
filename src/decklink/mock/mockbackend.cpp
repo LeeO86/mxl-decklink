@@ -595,6 +595,11 @@ namespace mxldl::dl
                 s.pcieLinkWidth = 8;
                 s.pcieLinkSpeed = 3;
                 s.temperatureC = 42.0;
+                // A card left at the driver default: 3G-SDI Level B.
+                s.sdiOutput.smpteLevelA = false;
+                s.sdiOutput.supportsSmpteLevelA = true;
+                s.sdiOutput.output1080pAsPsF = false;
+                s.sdiOutput.linkConfiguration = "single";
                 return s;
             }
 

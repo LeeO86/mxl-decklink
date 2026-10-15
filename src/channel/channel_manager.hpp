@@ -67,6 +67,7 @@ namespace mxldl::channel
             std::uint64_t framesDropped = 0;
             std::uint64_t framesRepeated = 0;
             int readOffsetGrains = 0; // outputs: effective read offset
+            dl::SdiOutputConfig sdiOutput; // outputs: read at bring-up
             std::uint64_t reconnects = 0;
             std::uint64_t grainsCommitted = 0;
             std::uint32_t bufferedAudioFrames = 0;

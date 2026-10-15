@@ -389,6 +389,23 @@ namespace mxldl::channel
                 return false;
             }
 
+            // How the card signals the SDI output (read only; set by the
+            // driver's preferences, not by this process).
+            {
+                auto const sdi = _subDevice.status().sdiOutput;
+                _status.setSdiOutput(sdi);
+                log::info("sdi_output_config",
+                    {
+                        {"channel_index", _cfg.index},
+                        {"channel_label", _cfg.label},
+                        {"video_mode", _mode.name},
+                        {"smpte_level", dl::smpteLevelName(sdi)},
+                        {"supports_smpte_level_a", sdi.supportsSmpteLevelA ? (*sdi.supportsSmpteLevelA ? "true" : "false") : "unknown"},
+                        {"output_1080p_as_psf", sdi.output1080pAsPsF ? (*sdi.output1080pAsPsF ? "true" : "false") : "unknown"},
+                        {"link_configuration", sdi.linkConfiguration.value_or("unknown")},
+                    });
+            }
+
             // §2.4: when a frame completes, the card still holds
             // CHx_OUTPUT_PREROLL_GRAINS - 1 frames. A read in that callback
             // waits at most that long, less a margin, or the card would show

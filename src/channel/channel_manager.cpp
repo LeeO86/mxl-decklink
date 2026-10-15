@@ -254,6 +254,7 @@ namespace mxldl::channel
                 v.framesDropped = status->framesDropped.load();
                 v.framesRepeated = status->framesRepeated.load();
                 v.readOffsetGrains = status->readOffsetGrains.load();
+                v.sdiOutput = status->sdiOutput();
                 v.reconnects = status->reconnects.load();
                 v.grainsCommitted = status->grainsCommitted.load();
                 v.bufferedAudioFrames = status->bufferedAudioFrames.load();

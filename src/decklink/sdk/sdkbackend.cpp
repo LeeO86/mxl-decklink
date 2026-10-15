@@ -826,6 +826,33 @@ namespace mxldl::dl
                 {
                     s.temperatureC = static_cast<double>(v);
                 }
+                // SDI output signalling as the driver has it: read only, this
+                // process sets none of it.
+                if (auto config = _device.queryInterface<IDeckLinkConfiguration>(IID_IDeckLinkConfiguration))
+                {
+                    if (config->GetFlag(bmdDeckLinkConfigSMPTELevelAOutput, &flag) == S_OK)
+                    {
+                        s.sdiOutput.smpteLevelA = flag;
+                    }
+                    if (config->GetFlag(bmdDeckLinkConfigOutput1080pAsPsF, &flag) == S_OK)
+                    {
+                        s.sdiOutput.output1080pAsPsF = flag;
+                    }
+                    if (config->GetInt(bmdDeckLinkConfigSDIOutputLinkConfiguration, &v) == S_OK)
+                    {
+                        s.sdiOutput.linkConfiguration = v == bmdLinkConfigurationSingleLink ? "single"
+                                                        : v == bmdLinkConfigurationDualLink ? "dual"
+                                                        : v == bmdLinkConfigurationQuadLink ? "quad"
+                                                                                            : "other";
+                    }
+                }
+                if (auto attrs = _device.queryInterface<IDeckLinkProfileAttributes>(IID_IDeckLinkProfileAttributes))
+                {
+                    if (attrs->GetFlag(BMDDeckLinkSupportsSMPTELevelAOutput, &flag) == S_OK)
+                    {
+                        s.sdiOutput.supportsSmpteLevelA = flag;
+                    }
+                }
                 return s;
             }
 

@@ -95,6 +95,10 @@ namespace mxldl::ops
             body += ",\"frames_dropped\":" + std::to_string(v.framesDropped);
             body += ",\"frames_repeated\":" + std::to_string(v.framesRepeated);
             body += ",\"read_offset_grains\":" + std::to_string(v.readOffsetGrains);
+            if (v.cfg.direction == config::Direction::Output)
+            {
+                body += ",\"sdi_output\":" + dl::sdiOutputJson(v.sdiOutput);
+            }
             body += ",\"reconnects\":" + std::to_string(v.reconnects);
             body += ",\"grains_committed\":" + std::to_string(v.grainsCommitted);
             body += ",\"active_video_flow_id\":\"" + v.activeVideoFlowId + "\"";
