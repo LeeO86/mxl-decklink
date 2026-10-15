@@ -4,11 +4,14 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
 
+#include "channel/reopen_schedule.hpp"
 #include "channel/state.hpp"
 #include "config/config.hpp"
 #include "decklink/device.hpp"
@@ -50,6 +53,10 @@ namespace mxldl::channel
         {
             config::AudioFlowConfig cfg;
             std::unique_ptr<mxlbridge::AudioReader> reader; // null when flow UUID is nil
+            /// The writer re-created the flow: the reader is out of the sync
+            /// group and not read until the supervisor re-opened it.
+            bool flowInvalid = false;
+            mxlFlowConfigInfo config{}; // at bring-up
         };
 
         void supervisorLoop();
@@ -60,18 +67,38 @@ namespace mxldl::channel
         bool scheduleGrain(std::uint64_t grainIndex);
         void prerollResetRequested();
 
+        // MXL_ERR_FLOW_INVALID handling (§2.4). The mark* and find* calls run
+        // with _callbackMutex held (or before playback starts); they take the
+        // reader out of the sync group and wake the supervisor.
+        void markVideoFlowInvalid();
+        void markAudioFlowInvalid(std::size_t slot);
+        void findInvalidReaders();
+        void requestReopen();
+        /// Supervisor thread: release the invalid readers and open them again
+        /// for the same flow ids.
+        void reopenInvalidReaders();
+        void waitForWork(std::chrono::milliseconds timeout);
+
         [[nodiscard]] mxlbridge::Domain& readerDomain();
 
         config::Config const& _globalCfg;
         config::ChannelConfig _cfg;
         dl::ISubDevice& _subDevice;
         mxlbridge::Domain& _domain;
-        std::unique_ptr<mxlbridge::Domain> _foreignDomain;
+        /// The channel's own MXL instance for its readers. MXL keeps one
+        /// reader per flow id and instance and hands it out again while any
+        /// holder keeps it, so a stale reader shared with another channel
+        /// could not be re-opened.
+        std::unique_ptr<mxlbridge::Domain> _readerDomain;
         std::string _cardIdLabel;
 
         Status _status;
         std::unique_ptr<dl::IPlaybackSession> _playback;
         std::unique_ptr<mxlbridge::VideoReader> _videoReader;
+        /// See AudioFlowReader::flowInvalid; _videoReader may then be null.
+        bool _videoFlowInvalid = false;
+        mxlRational _videoRate{};
+        mxlFlowConfigInfo _videoConfig{}; // at bring-up
         std::vector<AudioFlowReader> _audioFlows;
         /// Released before the readers: the group holds raw reader handles.
         std::unique_ptr<mxlbridge::FlowSyncGroup> _sync;
@@ -103,10 +130,18 @@ namespace mxldl::channel
         std::atomic<bool> _running{false};
         std::atomic<bool> _streamingUp{false};
 
+        // Wakes the supervisor when a reader saw its flow re-created.
+        std::mutex _wakeMutex;
+        std::condition_variable _wake;
+        std::atomic<bool> _reopenRequested{false};
+        ReopenSchedule _reopen; // supervisor thread only
+        bool _reopenDegraded = false; // supervisor thread only
+
         ops::Counter* _framesTotal = nullptr;
         ops::Counter* _framesDropped = nullptr;
         ops::Counter* _framesLate = nullptr;
         ops::Counter* _reconnectTotal = nullptr;
+        ops::Counter* _flowReopens = nullptr;
         ops::Gauge* _stateGauge = nullptr;
         ops::Gauge* _bufferedVideoGauge = nullptr;
         ops::Gauge* _bufferedAudioGauge = nullptr;

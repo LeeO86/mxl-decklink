@@ -51,6 +51,15 @@ namespace mxldl::mxlbridge
             return _reader;
         }
 
+        /// True when MXL reports that the writer re-created the flow (see
+        /// VideoReader::flowInvalid). Does not wait.
+        [[nodiscard]] bool flowInvalid() const;
+
+        [[nodiscard]] mxlFlowConfigInfo const& configInfo() const
+        {
+            return _configInfo;
+        }
+
         [[nodiscard]] std::string const& flowId() const
         {
             return _flowId;

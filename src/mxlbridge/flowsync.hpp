@@ -34,6 +34,10 @@ namespace mxldl::mxlbridge
 
         void addReader(mxlFlowReader reader);
 
+        /// The group's instance holds no readers, so MXL does not take a
+        /// released reader out of this group: remove it before releasing it.
+        void removeReader(mxlFlowReader reader);
+
         /// `timestampNs` is TAI nanoseconds since the SMPTE ST 2059 epoch
         /// (`mxlIndexToTimestamp`).
         [[nodiscard]] mxlStatus waitFor(std::uint64_t timestampNs, std::uint64_t timeoutNs);

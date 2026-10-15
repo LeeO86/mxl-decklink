@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "videoreader.hpp"
 
+#include <limits>
 #include <stdexcept>
 
 namespace mxldl::mxlbridge
@@ -46,5 +47,14 @@ namespace mxldl::mxlbridge
             return 0;
         }
         return info.headIndex;
+    }
+
+    bool VideoReader::flowInvalid() const
+    {
+        // Any index past the head is too early; MXL then checks the inode of
+        // the flow's data file.
+        mxlGrainInfo info{};
+        std::uint8_t* payload = nullptr;
+        return ::mxlFlowReaderGetGrainNonBlocking(_reader, std::numeric_limits<std::uint64_t>::max() - 1, &info, &payload) == MXL_ERR_FLOW_INVALID;
     }
 }

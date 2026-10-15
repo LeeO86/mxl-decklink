@@ -35,6 +35,11 @@ namespace mxldl::mxlbridge
         }
     }
 
+    void FlowSyncGroup::removeReader(mxlFlowReader reader)
+    {
+        (void)::mxlFlowSynchronizationGroupRemoveReader(_group, reader);
+    }
+
     mxlStatus FlowSyncGroup::waitFor(std::uint64_t timestampNs, std::uint64_t timeoutNs)
     {
         return ::mxlFlowSynchronizationGroupWaitForDataAt(_group, timestampNs, timeoutNs);

@@ -47,6 +47,16 @@ namespace mxldl::mxlbridge
         /// Current head index of the flow ring (for lag metrics §7.3).
         [[nodiscard]] std::uint64_t headIndex() const;
 
+        /// True when MXL reports that the writer re-created the flow (its
+        /// data file changed): a non-blocking read past the head returns
+        /// MXL_ERR_FLOW_INVALID. Does not wait.
+        [[nodiscard]] bool flowInvalid() const;
+
+        [[nodiscard]] mxlFlowConfigInfo const& configInfo() const
+        {
+            return _configInfo;
+        }
+
         [[nodiscard]] std::string const& flowId() const
         {
             return _flowId;

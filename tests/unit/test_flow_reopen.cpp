@@ -1,0 +1,525 @@
+// SPDX-License-Identifier: MIT
+// An output channel re-opens its MXL readers when the writer re-creates a
+// flow under the same id (MXL_ERR_FLOW_INVALID), without a channel restart.
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstring>
+#include <deque>
+#include <filesystem>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <thread>
+#include <vector>
+
+#include <unistd.h>
+
+#include <doctest/doctest.h>
+#include <mxl/time.h>
+
+#include "channel/output_channel.hpp"
+#include "channel/reopen_schedule.hpp"
+#include "config/videomodes.hpp"
+#include "mxlbridge/audiowriter.hpp"
+#include "mxlbridge/domain.hpp"
+#include "mxlbridge/videowriter.hpp"
+#include "ops/metrics.hpp"
+
+using namespace mxldl;
+namespace fs = std::filesystem;
+using namespace std::chrono_literals;
+
+TEST_CASE("reopen schedule: at once, then 100 ms, 200 ms, 500 ms and every 1 s while the flow is missing")
+{
+    constexpr std::uint64_t ms = 1'000'000ULL;
+    channel::ReopenSchedule s;
+    CHECK_FALSE(s.pending());
+    CHECK_FALSE(s.due(0));
+
+    s.flowInvalid(1000 * ms);
+    CHECK(s.pending());
+    CHECK(s.due(1000 * ms));
+
+    s.openFailed(1000 * ms);
+    CHECK_FALSE(s.due(1099 * ms));
+    CHECK(s.due(1100 * ms));
+    s.openFailed(1100 * ms);
+    CHECK(s.due(1300 * ms));
+    s.openFailed(1300 * ms);
+    CHECK_FALSE(s.due(1799 * ms));
+    CHECK(s.due(1800 * ms));
+    s.openFailed(1800 * ms);
+    CHECK(s.due(2800 * ms));
+    s.openFailed(2800 * ms);
+    CHECK_FALSE(s.due(3799 * ms));
+    CHECK(s.due(3800 * ms));
+    CHECK(s.failures() == 5);
+
+    // Degraded once the flow has been missing for 1 s.
+    CHECK_FALSE(s.degraded(1999 * ms));
+    CHECK(s.degraded(2000 * ms));
+
+    // Another reader of the channel goes invalid meanwhile: due at once, the
+    // event keeps its start and its failure count.
+    s.flowInvalid(3000 * ms);
+    CHECK(s.due(3000 * ms));
+    CHECK(s.failures() == 5);
+    CHECK(s.pendingForNs(3000 * ms) == 2000 * ms);
+
+    s.clear();
+    CHECK_FALSE(s.pending());
+    CHECK_FALSE(s.due(10'000 * ms));
+    CHECK_FALSE(s.degraded(10'000 * ms));
+    CHECK(s.failures() == 0);
+}
+
+namespace
+{
+    constexpr std::uint8_t kGen1 = 0x11;
+    constexpr std::uint8_t kGen2 = 0x22;
+
+    /// What the fake card was asked to play.
+    struct Played
+    {
+        std::mutex mutex;
+        std::vector<std::uint8_t> frames; // first byte of every scheduled frame
+        std::uint64_t audioBlocks = 0;
+        std::uint64_t audioBlocksWithSound = 0;
+
+        std::size_t frameCount()
+        {
+            std::lock_guard const lock{mutex};
+            return frames.size();
+        }
+
+        std::size_t countSince(std::size_t from, std::uint8_t value)
+        {
+            std::lock_guard const lock{mutex};
+            std::size_t n = 0;
+            for (auto i = from; i < frames.size(); ++i)
+            {
+                n += frames[i] == value ? 1 : 0;
+            }
+            return n;
+        }
+
+        std::uint64_t soundBlocks()
+        {
+            std::lock_guard const lock{mutex};
+            return audioBlocksWithSound;
+        }
+    };
+
+    /// Completes one scheduled frame per frame period, like a DeckLink output
+    /// that is never late, and pulls audio after each completion.
+    class FakePlayback final : public dl::IPlaybackSession
+    {
+    public:
+        explicit FakePlayback(std::shared_ptr<Played> played)
+            : _played(std::move(played))
+        {}
+
+        ~FakePlayback() override
+        {
+            stopPlayback();
+        }
+
+        std::optional<std::string> enable(Params const& params, dl::PlaybackCallbacks callbacks) override
+        {
+            _params = params;
+            _callbacks = std::move(callbacks);
+            return std::nullopt;
+        }
+
+        std::optional<std::uint64_t> scheduleFrame(std::uint8_t const* bytes, std::size_t size, std::int64_t, std::int64_t, std::int64_t) override
+        {
+            std::lock_guard const lock{_played->mutex};
+            _played->frames.push_back(size > 0 ? bytes[0] : 0);
+            auto const id = _nextId++;
+            _queue.push_back(id);
+            return id;
+        }
+
+        std::optional<std::string> scheduleAudio(void const* pcm, std::uint32_t sampleFrames) override
+        {
+            auto const n = static_cast<std::size_t>(sampleFrames) * static_cast<std::size_t>(_params.audioChannelCount);
+            auto const* samples = static_cast<std::int32_t const*>(pcm);
+            bool sound = false;
+            for (std::size_t i = 0; i < n && !sound; ++i)
+            {
+                sound = samples[i] != 0;
+            }
+            std::lock_guard const lock{_played->mutex};
+            ++_played->audioBlocks;
+            _played->audioBlocksWithSound += sound ? 1 : 0;
+            return std::nullopt;
+        }
+
+        std::optional<std::string> beginAudioPreroll() override
+        {
+            return std::nullopt;
+        }
+
+        std::optional<std::string> endAudioPreroll() override
+        {
+            return std::nullopt;
+        }
+
+        std::optional<std::string> startPlayback(std::int64_t, std::int64_t) override
+        {
+            _running = true;
+            auto const period = std::chrono::nanoseconds(1'000'000'000LL * _params.mode.rateDenominator / _params.mode.rateNumerator);
+            _ticker = std::thread([this, period] {
+                auto next = std::chrono::steady_clock::now() + period;
+                while (_running)
+                {
+                    std::this_thread::sleep_until(next);
+                    next += period;
+                    std::optional<std::uint64_t> id;
+                    {
+                        std::lock_guard const lock{_played->mutex};
+                        if (!_queue.empty())
+                        {
+                            id = _queue.front();
+                            _queue.pop_front();
+                        }
+                    }
+                    if (id && _running)
+                    {
+                        _callbacks.onFrameCompleted(*id, dl::CompletionResult::Completed);
+                        if (_params.audioEnable)
+                        {
+                            _callbacks.onRenderAudio(false);
+                        }
+                    }
+                }
+            });
+            return std::nullopt;
+        }
+
+        void stopPlayback() override
+        {
+            _running = false;
+            if (_ticker.joinable())
+            {
+                _ticker.join();
+            }
+        }
+
+        void disable() override {}
+
+        std::uint32_t bufferedVideoFrames() override
+        {
+            std::lock_guard const lock{_played->mutex};
+            return static_cast<std::uint32_t>(_queue.size());
+        }
+
+        std::uint32_t bufferedAudioFrames() override
+        {
+            return 0;
+        }
+
+        bool referenceLocked() override
+        {
+            return true;
+        }
+
+    private:
+        std::shared_ptr<Played> _played;
+        Params _params;
+        dl::PlaybackCallbacks _callbacks;
+        std::deque<std::uint64_t> _queue;
+        std::uint64_t _nextId = 1;
+        std::atomic<bool> _running{false};
+        std::thread _ticker;
+    };
+
+    class FakeSubDevice final : public dl::ISubDevice
+    {
+    public:
+        explicit FakeSubDevice(std::shared_ptr<Played> played)
+            : _played(std::move(played))
+        {
+            _info.displayName = "fake output";
+            _info.supportsPlayback = true;
+        }
+
+        [[nodiscard]] dl::SubDeviceInfo const& info() const override
+        {
+            return _info;
+        }
+
+        [[nodiscard]] bool supportsMode(config::VideoMode const&, config::Direction) override
+        {
+            return true;
+        }
+
+        dl::SubDeviceStatus status() override
+        {
+            return {};
+        }
+
+        std::unique_ptr<dl::ICaptureSession> openCapture() override
+        {
+            return nullptr;
+        }
+
+        std::unique_ptr<dl::IPlaybackSession> openPlayback() override
+        {
+            return std::make_unique<FakePlayback>(_played);
+        }
+
+    private:
+        std::shared_ptr<Played> _played;
+        dl::SubDeviceInfo _info;
+    };
+
+    /// Runs `step` every few milliseconds on its own thread until destroyed.
+    class Pump
+    {
+    public:
+        explicit Pump(std::function<void()> step)
+            : _thread([this, step = std::move(step)] {
+                while (!_stop)
+                {
+                    step();
+                    std::this_thread::sleep_for(2ms);
+                }
+            })
+        {}
+
+        ~Pump()
+        {
+            _stop = true;
+            _thread.join();
+        }
+
+    private:
+        std::atomic<bool> _stop{false};
+        std::thread _thread;
+    };
+
+    /// A video writer that commits the grain of the current TAI time, every
+    /// byte set to `fill`.
+    class VideoSource
+    {
+    public:
+        VideoSource(mxlbridge::Domain& domain, mxlbridge::VideoFlowParams const& p, std::uint8_t fill)
+            : _writer(domain, p, 1)
+            , _frame(_writer.grainPayloadSize() > 0 ? _writer.grainPayloadSize() : 1, fill)
+            , _pump([this] {
+                auto const rate = _writer.grainRate();
+                auto const index = ::mxlGetCurrentIndex(&rate);
+                if (index != _last)
+                {
+                    _last = index;
+                    (void)_writer.writeFrame(index, _frame.data(), _frame.size());
+                }
+            })
+        {}
+
+    private:
+        mxlbridge::VideoWriter _writer;
+        std::vector<std::uint8_t> _frame;
+        std::uint64_t _last = 0;
+        Pump _pump; // last: stops before the writer goes
+    };
+
+    /// An audio writer that commits every sample up to the current TAI time.
+    class AudioSource
+    {
+    public:
+        AudioSource(mxlbridge::Domain& domain, mxlbridge::AudioFlowParams const& p, std::int32_t value)
+            : _writer(domain, p, 1)
+            , _value(value)
+            , _pump([this] {
+                auto const rate = _writer.sampleRate();
+                auto const now = ::mxlGetCurrentIndex(&rate);
+                if (_last == 0)
+                {
+                    _last = now - 4800;
+                }
+                while (_last < now)
+                {
+                    auto const count = std::min<std::uint64_t>(now - _last, 480);
+                    _pcm.assign(static_cast<std::size_t>(count) * 2, _value);
+                    int const map[] = {0, 1};
+                    (void)_writer.writeSamples(_last + count, _pcm.data(), static_cast<std::size_t>(count), 2, map, config::AudioSampleType::Int32);
+                    _last += count;
+                }
+            })
+        {}
+
+    private:
+        mxlbridge::AudioWriter _writer;
+        std::int32_t _value;
+        std::uint64_t _last = 0;
+        std::vector<std::int32_t> _pcm;
+        Pump _pump;
+    };
+
+    struct Rig
+    {
+        fs::path path;
+        std::unique_ptr<mxlbridge::Domain> domain;
+        config::Config global;
+        config::ChannelConfig ch;
+        ops::Registry metrics;
+        std::shared_ptr<Played> played = std::make_shared<Played>();
+        std::unique_ptr<FakeSubDevice> sub = std::make_unique<FakeSubDevice>(played);
+        mxlbridge::VideoFlowParams video;
+        mxlbridge::AudioFlowParams audio;
+
+        explicit Rig(char const* name)
+            : path(fs::temp_directory_path() / (std::string("mxldl-reopen-") + name + "-" + std::to_string(::getpid())))
+        {
+            fs::remove_all(path);
+            domain = std::make_unique<mxlbridge::Domain>(path.string());
+
+            auto const mode = *config::lookupVideoMode("HD720p50");
+            video.id = *util::parseUuid("5d1f0c55-3a0e-4f0b-8f4d-1c2a3b4c5d01");
+            video.label = "reopen-video";
+            video.groupHint = "reopen:Video";
+            video.width = mode.width;
+            video.height = mode.height;
+            video.rateNumerator = mode.rateNumerator;
+            video.rateDenominator = mode.rateDenominator;
+
+            audio.id = *util::parseUuid("5d1f0c55-3a0e-4f0b-8f4d-1c2a3b4c5d02");
+            audio.label = "reopen-audio";
+            audio.groupHint = "reopen:Audio";
+            audio.channelCount = 2;
+
+            ch.index = 0;
+            ch.label = "ch0";
+            ch.direction = config::Direction::Output;
+            ch.videoModeName = mode.name;
+            ch.videoMode = mode;
+            ch.videoFlowId = video.id;
+            ch.audioEnable = false;
+            ch.audioChannelCount = 2;
+            ch.audioSampleType = config::AudioSampleType::Int32;
+        }
+
+        void withAudio()
+        {
+            ch.audioEnable = true;
+            config::AudioFlowConfig af;
+            af.index = 1;
+            af.flowId = audio.id;
+            af.channelCount = 2;
+            af.deckLinkChannels = {0, 1};
+            ch.audioFlows = {af};
+        }
+
+        ~Rig()
+        {
+            domain.reset();
+            std::error_code ec;
+            fs::remove_all(path, ec);
+        }
+
+        double reopens()
+        {
+            return metrics.counter("mxl_decklink_flow_reopens_total", "", labels()).value();
+        }
+
+        double reconnects()
+        {
+            return metrics.counter("mxl_decklink_reconnect_total", "", labels()).value();
+        }
+
+        ops::Labels labels() const
+        {
+            return {
+                {"card_id", "test"},
+                {"channel_index", "0"},
+                {"channel_label", "ch0"},
+                {"direction", "output"},
+                {"subdevice_index", "0"},
+            };
+        }
+    };
+
+    bool waitUntil(std::function<bool()> const& done, std::chrono::milliseconds limit)
+    {
+        auto const until = std::chrono::steady_clock::now() + limit;
+        while (std::chrono::steady_clock::now() < until)
+        {
+            if (done())
+            {
+                return true;
+            }
+            std::this_thread::sleep_for(10ms);
+        }
+        return done();
+    }
+}
+
+TEST_CASE("output channel re-opens a re-created video flow and keeps playing")
+{
+    Rig rig("video");
+    auto source = std::make_unique<VideoSource>(*rig.domain, rig.video, kGen1);
+    std::this_thread::sleep_for(200ms);
+
+    channel::OutputChannel out(rig.global, rig.ch, *rig.sub, *rig.domain, rig.metrics, "test");
+    out.start();
+    REQUIRE(waitUntil([&] { return out.status().state.load() == channel::State::Healthy; }, 3s));
+    REQUIRE(waitUntil([&] { return rig.played->countSince(0, kGen1) >= 10; }, 2s));
+
+    // The writer goes; the flow stays missing for longer than 1 s, then comes
+    // back under the same id with a new data file.
+    source.reset();
+    auto const gapStart = rig.played->frameCount();
+    std::this_thread::sleep_for(1500ms);
+    // SDI never stops: the last frame is repeated while the flow is missing.
+    CHECK(rig.played->frameCount() - gapStart >= 50);
+    CHECK(out.status().state.load() == channel::State::Degraded);
+    CHECK(rig.reopens() == 1.0);
+
+    auto const before = rig.played->frameCount();
+    source = std::make_unique<VideoSource>(*rig.domain, rig.video, kGen2);
+    CHECK(waitUntil([&] { return rig.played->countSince(before, kGen2) >= 10; }, 3s));
+    CHECK(waitUntil([&] { return out.status().state.load() == channel::State::Healthy; }, 1s));
+
+    // One event, one count; no channel restart and no preroll reset.
+    CHECK(rig.reopens() == 1.0);
+    CHECK(rig.reconnects() == 0.0);
+    CHECK(out.status().reconnects.load() == 0);
+
+    out.stop();
+    source.reset();
+}
+
+TEST_CASE("output channel re-opens a re-created audio flow of its sync group")
+{
+    Rig rig("audio");
+    rig.withAudio();
+    auto video = std::make_unique<VideoSource>(*rig.domain, rig.video, kGen1);
+    auto audio = std::make_unique<AudioSource>(*rig.domain, rig.audio, 0x10000000);
+    std::this_thread::sleep_for(200ms);
+
+    channel::OutputChannel out(rig.global, rig.ch, *rig.sub, *rig.domain, rig.metrics, "test");
+    out.start();
+    REQUIRE(waitUntil([&] { return out.status().state.load() == channel::State::Healthy; }, 3s));
+    REQUIRE(waitUntil([&] { return rig.played->soundBlocks() >= 10; }, 2s));
+
+    // Re-create the audio flow at once (the usual writer restart).
+    audio.reset();
+    audio = std::make_unique<AudioSource>(*rig.domain, rig.audio, 0x10000000);
+    CHECK(waitUntil([&] { return rig.reopens() == 1.0; }, 2s));
+    auto const sound = rig.played->soundBlocks();
+    auto const grains = out.status().grainsCommitted.load();
+    CHECK(waitUntil([&] { return rig.played->soundBlocks() >= sound + 10; }, 2s));
+    // Video went on from the live flow, not from repeated frames.
+    CHECK(out.status().grainsCommitted.load() >= grains + 10);
+
+    CHECK(rig.reopens() == 1.0);
+    CHECK(rig.reconnects() == 0.0);
+    CHECK(out.status().state.load() == channel::State::Healthy);
+
+    out.stop();
+    audio.reset();
+    video.reset();
+}
