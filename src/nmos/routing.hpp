@@ -62,10 +62,13 @@ namespace mxldl::nmosroute
     /// One leg per video / audio-flow / ANC endpoint on each configured channel.
     [[nodiscard]] std::vector<Leg> enumerateLegs(config::Config const& cfg, std::uint32_t cardPersistentId);
 
-    /// Applies one activation to `channels`. On success the matching channel's
-    /// flow id, master-enable flag, and (for receivers) reader domain path are
-    /// updated. Returns an error string when the leg, domain, or flow id is
-    /// not usable; `channels` is unchanged in that case.
+    /// Applies one activation to `channels`. On success the matching leg's
+    /// flow id, master-enable flag, and (for video and audio receivers) its
+    /// own reader domain path are updated. Returns an error string when the
+    /// leg, domain, or flow id is not usable; `channels` is unchanged in that
+    /// case. `requireDomainDirectory` false accepts a receiver domain whose
+    /// directory does not exist yet (a restored route waits for it).
     [[nodiscard]] std::optional<std::string> applyActivation(std::vector<config::ChannelConfig>& channels, std::vector<Leg> const& legs,
-        Activation const& activation, std::vector<DomainBinding> const& domains, std::string const& primaryDomainPath);
+        Activation const& activation, std::vector<DomainBinding> const& domains, std::string const& primaryDomainPath,
+        bool requireDomainDirectory = true);
 }

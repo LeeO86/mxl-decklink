@@ -122,6 +122,7 @@ add_library(mxl-decklink-core STATIC
     src/mxlbridge/flowdef.cpp
     src/mxlbridge/flowsync.cpp
     src/nmos/routing.cpp
+    src/nmos/route_state.cpp
     src/mxlbridge/videowriter.cpp
     src/mxlbridge/videoreader.cpp
     src/mxlbridge/audiowriter.cpp
@@ -201,6 +202,7 @@ if(MXL_DECKLINK_BUILD_TESTS)
         tests/unit/test_domainscan.cpp
         tests/unit/test_schema.cpp
         tests/unit/test_nmos_routing.cpp
+        tests/unit/test_route_state.cpp
         tests/unit/test_flowsync.cpp
         tests/unit/test_flow_reopen.cpp
     )

@@ -292,7 +292,7 @@ namespace mxldl::ops
                 << ",\"state\":" << jstr(channel::stateName(v.state)) << ",\"signal_locked\":" << (v.signalLocked ? "true" : "false")
                 << ",\"active_video_mode\":" << jstr(v.activeModeName) << ",\"video_mode_setting\":" << jstr(v.cfg.videoModeName)
                 << ",\"active_video_flow_id\":" << jstr(v.activeVideoFlowId) << ",\"frames_total\":" << v.framesTotal
-                << ",\"frames_dropped\":" << v.framesDropped << ",\"reconnects\":" << v.reconnects << ",\"grains_committed\":" << v.grainsCommitted
+                << ",\"frames_dropped\":" << v.framesDropped << ",\"frames_repeated\":" << v.framesRepeated << ",\"reconnects\":" << v.reconnects << ",\"grains_committed\":" << v.grainsCommitted
                 << ",\"last_frame_tai_ns\":" << v.lastFrameTaiNs;
             appendAudioJson(out, v, &flowById);
             out << "}";

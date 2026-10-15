@@ -252,6 +252,7 @@ namespace mxldl::channel
                 v.lastFrameTaiNs = status->lastFrameTaiNs.load();
                 v.framesTotal = status->framesTotal.load();
                 v.framesDropped = status->framesDropped.load();
+                v.framesRepeated = status->framesRepeated.load();
                 v.reconnects = status->reconnects.load();
                 v.grainsCommitted = status->grainsCommitted.load();
                 v.bufferedAudioFrames = status->bufferedAudioFrames.load();

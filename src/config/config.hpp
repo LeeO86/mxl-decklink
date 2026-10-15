@@ -74,6 +74,11 @@ namespace mxldl::config
         /// IS-05 master_enable for this audio leg. False stops the MXL read/write
         /// without forgetting `flowId` (BCP-007-03).
         bool mxlActive = true;
+        /// Output channels: MXL domain directory of this audio flow when it is
+        /// not `MXL_DOMAIN_PATH` (set by an IS-05 activation of this audio
+        /// receiver). Empty means the process domain. Each receiver has its
+        /// own: video and audio of one output may come from different domains.
+        std::string readerDomainPath;
 
         bool operator==(AudioFlowConfig const&) const = default;
     };
@@ -99,8 +104,10 @@ namespace mxldl::config
         /// False parks an output (no playback) and skips that input writer.
         bool videoMxlActive = true;
         bool ancMxlActive = true;
-        /// Output channels: MXL domain directory to read, when it is not
-        /// `MXL_DOMAIN_PATH`. Empty means the process domain.
+        /// Output channels: MXL domain directory of the video flow, when it is
+        /// not `MXL_DOMAIN_PATH` (set by an IS-05 activation of the video
+        /// receiver). Empty means the process domain. Audio flows carry their
+        /// own (AudioFlowConfig::readerDomainPath).
         std::string readerDomainPath;
         std::string videoFlowLabel; // defaulted at validation
         std::string groupHint;
@@ -113,6 +120,9 @@ namespace mxldl::config
         int commitBatchHintAudio = 256;
         int outputPrerollGrains = 3;
         int readerTimeoutMs = 50;
+        /// Output channels: read this many grains behind the newest one
+        /// (mirrored sources arrive with 1–2 grains of fabrics lag, §2.4).
+        int readOffsetGrains = 0;
         std::string label; // defaulted to "ch<x>"
 
         [[nodiscard]] bool isAutoMode() const
@@ -169,6 +179,9 @@ namespace mxldl::config
         int nmosQueryPort = -1;
         /// When false, DNS-SD browse and mDNS advertisement are both off.
         bool nmosDnsSd = false;
+        /// Restore the last IS-05 /active of every Sender and Receiver after
+        /// a restart (state/connections.json next to the config file, §7.7).
+        bool nmosResumeConnections = true;
         /// IP literal announced in IS-04/IS-05. Empty means the first
         /// non-loopback IPv4, resolved at startup when NMOS is enabled.
         std::string nmosHostAddress;

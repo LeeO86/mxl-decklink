@@ -47,6 +47,7 @@
 #include "sdp/json.h"
 
 #include "mxlbridge/domainscan.hpp"
+#include "nmos/route_state.hpp"
 #include "nmos/routing.hpp"
 #include "util/logging.hpp"
 #include "util/uuid.hpp"
@@ -205,6 +206,12 @@ namespace mxldl::nmosnode
         std::mutex flowMu;
         std::map<std::string, std::string> flowByLeg;
 
+        /// §7.7: saved /active endpoints (null when NMOS_RESUME_CONNECTIONS
+        /// is false), and what the restore made of them, for the /active of
+        /// the connection resources at build time.
+        std::unique_ptr<nmosroute::RouteState> routes;
+        std::map<std::string, nmosroute::SavedActivation> restoredActive;
+
         std::mutex modelMu;
         nmos::node_model* model = nullptr;
         std::atomic<bool> accept{true};
@@ -219,6 +226,7 @@ namespace mxldl::nmosnode
         struct Job
         {
             nmosroute::Activation activation;
+            std::optional<std::string> peerId; // sender_id / receiver_id in /active
         };
         std::mutex jobMu;
         std::condition_variable jobCv;
@@ -343,6 +351,47 @@ namespace mxldl::nmosnode
             }
         }
 
+        /// §7.7: /active and /staged of a restored leg show the saved route.
+        void restoreEndpoint(nmos::resource& connection, nmosroute::Leg const& leg)
+        {
+            using web::json::value;
+            auto const it = restoredActive.find(leg.id);
+            if (it == restoredActive.end())
+            {
+                return;
+            }
+            auto const& saved = it->second;
+            for (auto const* endpoint : {U("active"), U("staged")})
+            {
+                auto& data = connection.data[endpoint];
+                data[U("master_enable")] = value::boolean(saved.masterEnable);
+                auto& params = data[U("transport_params")][0];
+                if (!saved.domainId.empty())
+                {
+                    params[U("mxl_domain_id")] = value::string(us(saved.domainId));
+                }
+                params[U("mxl_flow_id")] = saved.flowId ? value::string(us(*saved.flowId)) : value::null();
+                data[leg.sender ? U("receiver_id") : U("sender_id")] = saved.peerId ? value::string(us(*saved.peerId)) : value::null();
+            }
+        }
+
+        /// §7.7: the IS-04 subscription of a restored leg names the other end
+        /// again: a Receiver's {sender_id, active}, a Sender's
+        /// {receiver_id, active}.
+        void restoreSubscription(nmos::resource& resource, nmosroute::Leg const& leg)
+        {
+            using web::json::value;
+            auto const it = restoredActive.find(leg.id);
+            if (it == restoredActive.end())
+            {
+                return;
+            }
+            auto const& saved = it->second;
+            auto& subscription = resource.data[U("subscription")];
+            subscription[U("active")] = value::boolean(saved.masterEnable);
+            subscription[leg.sender ? U("receiver_id") : U("sender_id")] = saved.peerId ? value::string(us(*saved.peerId)) : value::null();
+        }
+
         void buildResources(nmos::node_model& model)
         {
             using web::json::value;
@@ -427,6 +476,7 @@ namespace mxldl::nmosnode
 
                     auto sender = nmos::make_sender(us(leg.id), us(flowId), nmos::transports::mxl, us(deviceId), {}, {}, model.settings);
                     sender.data[U("subscription")][U("active")] = value::boolean(active);
+                    restoreSubscription(sender, leg);
                     setLabel(sender, ch->label + " " + role, "MXL sender");
                     tagGroup(sender, group, role);
                     insert(model, model.node_resources, std::move(sender));
@@ -450,6 +500,7 @@ namespace mxldl::nmosnode
                     connection.data[U("active")][U("master_enable")] = value::boolean(active);
                     connection.data[U("staged")][U("master_enable")] = value::boolean(active);
                     connection.data[U("transportfile")] = value::null();
+                    restoreEndpoint(connection, leg);
                     insert(model, model.connection_resources, std::move(connection));
                 }
                 else
@@ -500,6 +551,7 @@ namespace mxldl::nmosnode
                     setLabel(receiver, ch->label + " " + role, "MXL receiver");
                     tagGroup(receiver, group, role);
                     receiver.data[U("version")] = value::string(nmos::make_version());
+                    restoreSubscription(receiver, leg);
                     insert(model, model.node_resources, std::move(receiver));
 
                     // No enum of mxl_domain_id: a domain created after the start (a new production's output)
@@ -521,6 +573,7 @@ namespace mxldl::nmosnode
                     }
                     connection.data[U("active")][U("master_enable")] = value::boolean(active);
                     connection.data[U("staged")][U("master_enable")] = value::boolean(active);
+                    restoreEndpoint(connection, leg);
                     insert(model, model.connection_resources, std::move(connection));
                 }
             }
@@ -683,6 +736,7 @@ namespace mxldl::nmosnode
                             {"domain_id", job.activation.domainId},
                             {"flow_id", job.activation.flowId.value_or("")},
                         });
+                    saveActivation(job, known);
                     if (persist)
                     {
                         try
@@ -698,13 +752,112 @@ namespace mxldl::nmosnode
             }
         }
 
-        void enqueue(nmosroute::Activation activation)
+        void enqueue(nmosroute::Activation activation, std::optional<std::string> peerId)
         {
             {
                 std::lock_guard const lock{jobMu};
-                jobs.push(Job{std::move(activation)});
+                jobs.push(Job{std::move(activation), std::move(peerId)});
             }
             jobCv.notify_one();
+        }
+
+        /// §7.7: remember an accepted activation for the next start.
+        void saveActivation(Job const& job, std::vector<nmosroute::DomainBinding> const& known)
+        {
+            if (!routes)
+            {
+                return;
+            }
+            nmosroute::SavedActivation saved;
+            saved.legId = job.activation.legId;
+            for (auto const& leg : legs)
+            {
+                if (leg.id == saved.legId)
+                {
+                    saved.sender = leg.sender;
+                }
+            }
+            saved.masterEnable = job.activation.masterEnable;
+            saved.domainId = job.activation.domainId;
+            for (auto const& d : known)
+            {
+                if (d.id == saved.domainId)
+                {
+                    saved.domainPath = d.path;
+                }
+            }
+            saved.flowId = job.activation.flowId;
+            saved.peerId = job.peerId;
+            if (routes->save(saved))
+            {
+                log::info("nmos_connection_saved", {{"leg", saved.legId}, {"path", routes->path()}});
+            }
+        }
+
+        static std::optional<std::string> readPeer(nmos::resource const& connection)
+        {
+            auto const& active = connection.data.at(U("active"));
+            auto const field = connection.type == nmos::types::sender ? U("receiver_id") : U("sender_id");
+            if (active.has_field(field) && active.at(field).is_string())
+            {
+                return su(active.at(field).as_string());
+            }
+            return std::nullopt;
+        }
+
+        /// §7.7: apply the saved activations before the channels start.
+        void restoreConnections()
+        {
+            routes = std::make_unique<nmosroute::RouteState>(nmosroute::routeStatePath(cfg));
+            routes->load();
+            auto const saved = routes->all();
+            if (saved.empty())
+            {
+                return;
+            }
+            auto cfgs = channels.channelConfigs();
+            auto const outcomes = nmosroute::restoreActivations(cfgs, legs, saved, knownDomains(), primaryDomainId, primaryDomainPath);
+            for (auto const& o : outcomes)
+            {
+                using Kind = nmosroute::RestoreOutcome::Kind;
+                switch (o.kind)
+                {
+                    case Kind::Skipped:
+                        log::warn("restored_activation_skipped", {{"leg", o.active.legId}, {"reason", o.reason}});
+                        continue;
+                    case Kind::Disabled:
+                        log::warn("restored_activation_disabled", {{"leg", o.active.legId}, {"flow_id", o.active.flowId.value_or("")}, {"reason", o.reason}});
+                        break;
+                    case Kind::Waiting:
+                        log::info("nmos_connection_restored",
+                            {
+                                {"leg", o.active.legId},
+                                {"master_enable", o.active.masterEnable},
+                                {"domain_id", o.active.domainId},
+                                {"flow_id", o.active.flowId.value_or("")},
+                                {"waiting", o.reason},
+                            });
+                        break;
+                    case Kind::Restored:
+                        log::info("nmos_connection_restored",
+                            {
+                                {"leg", o.active.legId},
+                                {"master_enable", o.active.masterEnable},
+                                {"domain_id", o.active.domainId},
+                                {"flow_id", o.active.flowId.value_or("")},
+                            });
+                        break;
+                }
+                restoredActive[o.active.legId] = o.active;
+            }
+            auto const applied = channels.applyChannels(cfgs);
+            if (auto const err = std::get_if<std::string>(&applied))
+            {
+                log::error("nmos_connection_restore_failed", {{"details", *err}});
+                restoredActive.clear();
+                return;
+            }
+            cfg.channels = std::move(cfgs);
         }
 
         nmosroute::Activation readActivation(nmos::resource const& connection)
@@ -780,6 +933,10 @@ namespace mxldl::nmosnode
                 primaryDomainId = cfg.outputDomainId.empty() ? mxlbridge::ensureDomainId(cfg.domainPath) : cfg.outputDomainId;
                 refreshDomains();
                 legs = nmosroute::enumerateLegs(cfg, cardId);
+                if (cfg.nmosResumeConnections)
+                {
+                    restoreConnections();
+                }
 
                 // Park unassigned output receivers so they wait for IS-05 instead of retrying.
                 {
@@ -863,7 +1020,7 @@ namespace mxldl::nmosnode
                                               {
                                                   return;
                                               }
-                                              enqueue(readActivation(connection));
+                                              enqueue(readActivation(connection), readPeer(connection));
                                           });
 
                 auto server = nmos::experimental::make_node_server(nodeModel, implementation, logModel, gate);

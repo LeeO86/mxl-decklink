@@ -51,6 +51,9 @@ namespace mxldl::mxlbridge
             return _reader;
         }
 
+        /// Current head index of the flow (sample index), 0 when unknown.
+        [[nodiscard]] std::uint64_t headIndex() const;
+
         /// True when MXL reports that the writer re-created the flow (see
         /// VideoReader::flowInvalid). Does not wait.
         [[nodiscard]] bool flowInvalid() const;

@@ -78,6 +78,16 @@ namespace mxldl::mxlbridge
         return MXL_STATUS_OK;
     }
 
+    std::uint64_t AudioReader::headIndex() const
+    {
+        mxlFlowRuntimeInfo info{};
+        if (::mxlFlowReaderGetRuntimeInfo(_reader, &info) != MXL_STATUS_OK)
+        {
+            return 0;
+        }
+        return info.headIndex;
+    }
+
     bool AudioReader::flowInvalid() const
     {
         mxlWrappedMultiBufferSlice slices{};

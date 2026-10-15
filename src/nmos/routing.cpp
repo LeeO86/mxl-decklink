@@ -131,7 +131,7 @@ namespace mxldl::nmosroute
     }
 
     std::optional<std::string> applyActivation(std::vector<config::ChannelConfig>& channels, std::vector<Leg> const& legs, Activation const& activation,
-        std::vector<DomainBinding> const& domains, std::string const& primaryDomainPath)
+        std::vector<DomainBinding> const& domains, std::string const& primaryDomainPath, bool requireDomainDirectory)
     {
         Leg const* leg = nullptr;
         for (auto const& candidate : legs)
@@ -219,17 +219,30 @@ namespace mxldl::nmosroute
             }
         }
 
-        if (!leg->sender)
+        if (!leg->sender && leg->kind != LegKind::Anc)
         {
+            // Each receiver keeps its own domain: the video and the audio of
+            // one output may come from different functions (domains).
+            std::string path;
             if (domain != nullptr && domain->path != primaryDomainPath)
             {
-                updated.readerDomainPath = domain->path;
+                path = domain->path;
+            }
+            if (leg->kind == LegKind::Video)
+            {
+                updated.readerDomainPath = path;
             }
             else
             {
-                updated.readerDomainPath.clear();
+                for (auto& af : updated.audioFlows)
+                {
+                    if (af.index == leg->audioIndex)
+                    {
+                        af.readerDomainPath = path;
+                    }
+                }
             }
-            if (domain != nullptr && !std::filesystem::is_directory(domain->path))
+            if (domain != nullptr && requireDomainDirectory && !std::filesystem::is_directory(domain->path))
             {
                 return "MXL domain directory does not exist: " + domain->path;
             }

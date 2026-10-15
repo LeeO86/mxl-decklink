@@ -93,6 +93,7 @@ namespace mxldl::ops
             body += ",\"last_frame_tai_ns\":" + std::to_string(v.lastFrameTaiNs);
             body += ",\"frames_total\":" + std::to_string(v.framesTotal);
             body += ",\"frames_dropped\":" + std::to_string(v.framesDropped);
+            body += ",\"frames_repeated\":" + std::to_string(v.framesRepeated);
             body += ",\"reconnects\":" + std::to_string(v.reconnects);
             body += ",\"grains_committed\":" + std::to_string(v.grainsCommitted);
             body += ",\"active_video_flow_id\":\"" + v.activeVideoFlowId + "\"";

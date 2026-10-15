@@ -118,12 +118,12 @@ onUnmounted(() => clearInterval(timer));
       <table>
         <thead>
           <tr>
-            <th v-for="h in ['#','Label','Dir','Sub','State','Mode','Signal','Audio','Frames','Drops','Grains','Reconn','Video flow']" :key="h">{{ h }}</th>
+            <th v-for="h in ['#','Label','Dir','Sub','State','Mode','Signal','Audio','Frames','Drops','Repeats','Grains','Reconn','Video flow']" :key="h">{{ h }}</th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="!status.channels.length">
-            <td colspan="13" class="muted">no channels configured</td>
+            <td colspan="14" class="muted">no channels configured</td>
           </tr>
           <tr v-for="c in status.channels" :key="c.index">
             <td>{{ c.index }}</td>
@@ -140,6 +140,7 @@ onUnmounted(() => clearInterval(timer));
             </td>
             <td>{{ c.frames_total }}</td>
             <td>{{ c.frames_dropped }}</td>
+            <td>{{ c.frames_repeated ?? 0 }}</td>
             <td>{{ c.grains_committed }}</td>
             <td>{{ c.reconnects }}</td>
             <td><code>{{ c.active_video_flow_id.slice(0, 8) }}…</code></td>
