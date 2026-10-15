@@ -220,6 +220,7 @@ namespace mxldl::channel
         std::atomic<std::uint64_t> _lateRunCount{0}; // late repeats in the current run
         std::atomic<std::uint64_t> _prevLateRunCount{0};
         std::atomic<std::uint64_t> _lateRunStartNs{0};
+        std::atomic<std::uint64_t> _lateSinceNs{0}; // first late repeat since the last grain read in time; 0 = none
         std::atomic<std::uint64_t> _lateLastNs{0}; // steady ns of the last late repeat
         std::atomic<std::uint64_t> _catchUps{0};
         std::atomic<std::uint64_t> _catchUpGrains{0};

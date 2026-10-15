@@ -413,8 +413,11 @@ namespace
     class VideoSource
     {
     public:
-        VideoSource(mxlbridge::Domain& domain, mxlbridge::VideoFlowParams const& p, std::uint8_t fill)
-            : _writer(domain, p, 1)
+        /// `invalidFirst`: the first grains it writes are marked invalid.
+        VideoSource(mxlbridge::Domain& domain, mxlbridge::VideoFlowParams const& p, std::uint8_t fill, bool startPaused = false, int invalidFirst = 0)
+            : paused(startPaused)
+            , _invalidLeft(invalidFirst)
+            , _writer(domain, p, 1)
             , _frame(_writer.grainPayloadSize() > 0 ? _writer.grainPayloadSize() : 1, fill)
             , _pump([this] {
                 if (paused)
@@ -429,12 +432,7 @@ namespace
                     if (t >= _nextStep)
                     {
                         _nextStep = t + std::chrono::milliseconds(step);
-                        ++_last;
-                        if (_frame.size() >= kStampAt + sizeof _last)
-                        {
-                            std::memcpy(_frame.data() + kStampAt, &_last, sizeof _last);
-                        }
-                        (void)_writer.writeFrame(_last, _frame.data(), _frame.size());
+                        put(_last + 1);
                     }
                     return;
                 }
@@ -444,12 +442,7 @@ namespace
                 auto const index = ::mxlGetCurrentIndex(&rate) - offset.load();
                 if (index > _last)
                 {
-                    _last = index;
-                    if (_frame.size() >= kStampAt + sizeof index)
-                    {
-                        std::memcpy(_frame.data() + kStampAt, &index, sizeof index);
-                    }
-                    (void)_writer.writeFrame(index, _frame.data(), _frame.size());
+                    put(index);
                 }
             })
         {}
@@ -457,8 +450,43 @@ namespace
         std::atomic<bool> paused{false};
         std::atomic<std::uint64_t> offset{0}; // source latency in grains
         std::atomic<int> stepMs{0}; // > 0: one grain every stepMs, slower than real time
+        /// The newest grain has only half its slices until the next one is
+        /// written (a writer that commits slice by slice).
+        std::atomic<bool> partialNewest{false};
 
     private:
+        void put(std::uint64_t index)
+        {
+            if (_frame.size() >= kStampAt + sizeof index)
+            {
+                std::memcpy(_frame.data() + kStampAt, &index, sizeof index);
+            }
+            if (_invalidLeft > 0)
+            {
+                --_invalidLeft;
+                (void)_writer.writeInvalid(index);
+            }
+            else if (partialNewest)
+            {
+                if (_last != 0 && _lastPartial)
+                {
+                    std::memcpy(_frame.data() + kStampAt, &_last, sizeof _last);
+                    (void)_writer.writeFrame(_last, _frame.data(), _frame.size());
+                    std::memcpy(_frame.data() + kStampAt, &index, sizeof index);
+                }
+                (void)_writer.writePartial(index, _frame.data(), _frame.size(), 1);
+                _lastPartial = true;
+            }
+            else
+            {
+                (void)_writer.writeFrame(index, _frame.data(), _frame.size());
+                _lastPartial = false;
+            }
+            _last = index;
+        }
+
+        int _invalidLeft = 0;
+        bool _lastPartial = false;
         mxlbridge::VideoWriter _writer;
         std::vector<std::uint8_t> _frame;
         std::uint64_t _last = 0;
@@ -1122,6 +1150,101 @@ TEST_CASE("short stalls, late runs and catch-ups are logged")
     CHECK(logs.of("output_frames_lost").empty());
     CHECK(rig.played->lateFrames() <= 1);
     CHECK(rig.reconnects() == 0.0);
+    out.stop();
+    video.reset();
+}
+
+TEST_CASE("audio starts with the frame the preroll shows: a new mirror without grains, invalid first grains")
+{
+    // The preroll may jump to the source's newest grain (a mirror the route
+    // created, whose first grain lands during the preroll) or pass over
+    // grains its writer marked invalid. The audio must start at the grain
+    // shown, not where the preroll began.
+    for (int scenario = 0; scenario < 2; ++scenario)
+    {
+        CAPTURE(scenario);
+        Rig rig(scenario == 0 ? "prerollsync0" : "prerollsync1");
+        rig.withAudio();
+        auto audio = std::make_unique<AudioSource>(*rig.domain, rig.audio, kStamped);
+        std::unique_ptr<VideoSource> video;
+        if (scenario == 0)
+        {
+            video = std::make_unique<VideoSource>(*rig.domain, rig.video, kGen1, true); // no grain yet
+        }
+        else
+        {
+            video = std::make_unique<VideoSource>(*rig.domain, rig.video, kGen1, false, 3);
+            std::this_thread::sleep_for(30ms);
+        }
+        channel::OutputChannel out(rig.global, rig.ch, *rig.sub, *rig.domain, rig.metrics, "test");
+        out.start();
+        if (scenario == 0)
+        {
+            std::this_thread::sleep_for(80ms);
+            video->paused = false; // the first grain lands during the preroll
+        }
+        REQUIRE(waitUntil([&] { return out.status().state.load() == channel::State::Healthy; }, 3s));
+        REQUIRE(waitUntil([&] { return rig.played->pairCount() >= 30; }, 3s));
+        // Audio block - video grain as on a normal start: -(preroll).
+        CHECK(rig.played->avOffset(5) == -rig.ch.outputPrerollGrains);
+        out.stop();
+        audio.reset();
+        video.reset();
+    }
+}
+
+TEST_CASE("a new session does not repeat the previous session's picture")
+{
+    Rig rig("lastframe");
+    auto first = std::make_unique<VideoSource>(*rig.domain, rig.video, kGen1);
+    std::this_thread::sleep_for(200ms);
+    LogCapture logs;
+    channel::OutputChannel out(rig.global, rig.ch, *rig.sub, *rig.domain, rig.metrics, "test");
+    out.start();
+    REQUIRE(waitUntil([&] { return rig.played->countSince(0, kGen1) >= 10; }, 3s));
+    out.stop();
+
+    // The writer goes; a new one creates the flow again but writes nothing
+    // yet. The new session has nothing to show: it must not show the old
+    // session's last frame, but wait and retry.
+    first.reset();
+    auto second = std::make_unique<VideoSource>(*rig.domain, rig.video, kGen2, true);
+    auto const from = rig.played->frameCount();
+    out.start();
+    REQUIRE(waitUntil([&] { return !logs.of("preroll_grain_unavailable").empty(); }, 3s));
+    CHECK(rig.played->countSince(from, kGen1) == 0);
+    CHECK(out.status().state.load() != channel::State::Healthy);
+    second->paused = false;
+    CHECK(waitUntil([&] { return rig.played->countSince(from, kGen2) >= 10; }, 5s));
+    CHECK(rig.played->countSince(from, kGen1) == 0);
+    out.stop();
+    second.reset();
+}
+
+TEST_CASE("a read out of the history moves on when the newest grain is still being written")
+{
+    // A writer that commits slice by slice: its newest grain is never
+    // complete. A source that jumps far ahead (after running slower than
+    // real time) leaves the read out of the history; reading its newest
+    // grain then fails, but the read position must still move on.
+    Rig rig("partial");
+    auto video = std::make_unique<VideoSource>(*rig.domain, rig.video, kGen1);
+    video->partialNewest = true;
+    std::this_thread::sleep_for(200ms);
+    channel::OutputChannel out(rig.global, rig.ch, *rig.sub, *rig.domain, rig.metrics, "test");
+    out.start();
+    REQUIRE(waitUntil([&] { return out.status().state.load() == channel::State::Healthy; }, 3s));
+    REQUIRE(waitUntil([&] { return out.status().grainsCommitted.load() >= 20; }, 2s));
+
+    video->stepMs = 30;
+    std::this_thread::sleep_for(600ms);
+    video->stepMs = 0; // jumps to the current time, 10+ grains ahead
+    std::this_thread::sleep_for(300ms);
+    auto const grains = out.status().grainsCommitted.load();
+    auto const errors = rig.counter("mxl_decklink_frames_repeated_total", "reason", "read_error");
+    std::this_thread::sleep_for(1000ms);
+    CHECK(out.status().grainsCommitted.load() - grains >= 40);
+    CHECK(rig.counter("mxl_decklink_frames_repeated_total", "reason", "read_error") - errors <= 2.0);
     out.stop();
     video.reset();
 }

@@ -92,6 +92,22 @@ namespace mxldl::mxlbridge
         return status;
     }
 
+    mxlStatus VideoWriter::writePartial(std::uint64_t grainIndex, std::uint8_t const* frameData, std::size_t frameBytes, std::uint16_t validSlices)
+    {
+        mxlGrainInfo info{};
+        std::uint8_t* payload = nullptr;
+        auto status = ::mxlFlowWriterOpenGrain(_writer, grainIndex, &info, &payload);
+        if (status != MXL_STATUS_OK)
+        {
+            return status;
+        }
+        auto const n = frameBytes < info.grainSize ? frameBytes : static_cast<std::size_t>(info.grainSize);
+        std::memcpy(payload, frameData, n);
+        info.flags = 0;
+        info.validSlices = validSlices < info.totalSlices ? validSlices : info.totalSlices;
+        return ::mxlFlowWriterCommitGrain(_writer, &info);
+    }
+
     mxlStatus VideoWriter::writeInvalid(std::uint64_t grainIndex)
     {
         mxlGrainInfo info{};

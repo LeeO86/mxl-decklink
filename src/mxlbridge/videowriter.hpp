@@ -36,6 +36,10 @@ namespace mxldl::mxlbridge
         /// Commits an invalid grain (§3.5: signal-loss gap marking).
         mxlStatus writeInvalid(std::uint64_t grainIndex);
 
+        /// Commits `frameData` with only `validSlices` of the grain's slices
+        /// valid (a writer that commits slice by slice; tests).
+        mxlStatus writePartial(std::uint64_t grainIndex, std::uint8_t const* frameData, std::size_t frameBytes, std::uint16_t validSlices);
+
         [[nodiscard]] mxlRational grainRate() const
         {
             return _configInfo.common.grainRate;

@@ -284,12 +284,18 @@ namespace mxldl::channel
         _reopen.clear();
         _reopenDegraded = false;
         _videoStalled = false;
+        {
+            // A new session never repeats the previous one's picture.
+            std::lock_guard const lock{_scheduleMutex};
+            _lastFrame.clear();
+        }
         _videoLastHead = 0;
         _videoHeadChangeNs = 0;
         _lateDegraded = false;
         _behindSinceNs = 0;
         _lateRunCount.store(0);
         _lateLastNs.store(0);
+        _lateSinceNs.store(0);
         _stallSinceNs.store(0);
         _stallDegraded = false;
         _stallLogged = false;
@@ -453,12 +459,15 @@ namespace mxldl::channel
                 {
                     if (!shown)
                     {
-                        // Audio starts with the first frame shown.
+                        // Audio starts with the grain of the first frame
+                        // shown. That is the one before the read position
+                        // now, also when the read jumped ahead to the
+                        // source's newest grain (resumeAt).
                         shown = true;
                         std::lock_guard const lock{_scheduleMutex};
                         if (!_audioFlows.empty())
                         {
-                            _nextAudioEndIndex = idx * _samplesPerFrame;
+                            _nextAudioEndIndex = (_nextGrainIndex - 1) * _samplesPerFrame;
                         }
                     }
                     ++scheduled;
@@ -478,9 +487,16 @@ namespace mxldl::channel
                 }
                 if (idx >= head)
                 {
-                    // Not written yet: read it again.
-                    std::lock_guard const lock{_scheduleMutex};
-                    _nextGrainIndex = idx;
+                    // Not written yet: read it again (a stalled reader does
+                    // not wait in the read: do not spin).
+                    {
+                        std::lock_guard const lock{_scheduleMutex};
+                        _nextGrainIndex = idx;
+                    }
+                    if (steadyNowNs() - now < 1'000'000ULL)
+                    {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                    }
                 }
             }
 
@@ -633,11 +649,19 @@ namespace mxldl::channel
                     auto const now = steadyNowNs();
                     auto const head = _videoReader->headIndex();
                     noteHead(head, now, _videoLastHead, _videoHeadChangeNs);
+                    if ((status == MXL_ERR_OUT_OF_RANGE_TOO_EARLY || status == MXL_ERR_TIMEOUT) && grainIndex < head)
+                    {
+                        // The head moved past this grain after the read gave
+                        // up: it may have been committed just now. Look once
+                        // more before calling it a gap.
+                        status = _videoReader->getGrain(grainIndex, 0, grain);
+                    }
                     if (status == MXL_STATUS_OK)
                     {
                         reason = RepeatReason::ReadError; // when the grain is marked invalid
                         bool const wasStalled = _videoStalled;
                         setVideoStalled(false);
+                        _lateSinceNs.store(0);
                         bool const invalid = grain.payload == nullptr || (grain.info.flags & MXL_GRAIN_FLAG_INVALID) != 0;
                         auto const offset = static_cast<std::uint64_t>(_readOffset);
                         if (invalid && (wasStalled || head > grainIndex + offset + 1))
@@ -696,6 +720,8 @@ namespace mxldl::channel
                             if (_playing.load())
                             {
                                 noteLate(now);
+                                std::uint64_t expected = 0;
+                                _lateSinceNs.compare_exchange_strong(expected, now);
                             }
                         }
                     }
@@ -712,6 +738,14 @@ namespace mxldl::channel
                             if (status == MXL_STATUS_OK)
                             {
                                 setVideoStalled(false);
+                            }
+                            else if (adjust == 0)
+                            {
+                                // The newest grain is not complete yet (a
+                                // writer that commits slice by slice): move
+                                // the read position anyway, or every later
+                                // read would fall out of the history too.
+                                adjust = catchUp(grainIndex, head, true);
                             }
                         }
                     }
@@ -1482,8 +1516,10 @@ namespace mxldl::channel
                 });
             _lateRunEndLogged = _lateRunStartLogged;
         }
-        auto const runStart = _lateRunStartNs.load();
-        bool const late = !runOver && lastLate != 0 && runCount >= kLateRunLog && lastLate > runStart && lastLate - runStart >= kLateDegradedNs;
+        // Degraded only while no grain came in time for 1 s: a jittery source
+        // late now and then stays healthy (and in /readyz).
+        auto const lateSince = _lateSinceNs.load();
+        bool const late = lateSince != 0 && now > lateSince && now - lateSince >= kLateDegradedNs;
         if (late != _lateDegraded)
         {
             _lateDegraded = late;
@@ -1551,11 +1587,14 @@ namespace mxldl::channel
             return 0;
         }
         auto const target = head - offset;
-        auto const read = _videoReader->getGrain(target, 0, grain);
-        if (read != MXL_STATUS_OK)
+        mxlbridge::VideoReader::Grain newest;
+        auto const read = _videoReader->getGrain(target, 0, newest);
+        if (read != MXL_STATUS_OK || newest.payload == nullptr || (newest.info.flags & MXL_GRAIN_FLAG_INVALID) != 0)
         {
             return 0; // keep the read position; the next frame reads on
         }
+        grain = newest;
+        _lateSinceNs.store(0);
         status = read;
         auto const skip = target - grainIndex;
         _catchUpGrains.fetch_add(skip);
