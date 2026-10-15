@@ -54,9 +54,11 @@ namespace mxldl::channel
         constexpr std::uint64_t kCatchUpAfterNs = 1'000'000'000ULL;
         // §2.4: a source late for this long marks the channel degraded.
         constexpr std::uint64_t kLateDegradedNs = 1'000'000'000ULL;
-        // How long a preroll waits for the first grain of a flow that has
-        // none yet (an idle mirror the route woke up).
-        constexpr std::uint64_t kFirstGrainWaitNs = 1'000'000'000ULL;
+        // A preroll waits this long for the first grain of a flow that has
+        // none yet (an idle mirror the route woke up), in state init; it
+        // logs preroll_no_grain_yet once after kFirstGrainNoteNs.
+        constexpr std::uint64_t kFirstGrainGiveUpNs = 10'000'000'000ULL;
+        constexpr std::uint64_t kFirstGrainNoteNs = 1'000'000'000ULL;
         // A late run is logged once it has this many frames in a row.
         constexpr std::uint64_t kLateRunLog = 3;
         // Late repeats less than this apart belong to one run (a source
@@ -542,25 +544,47 @@ namespace mxldl::channel
             if (sourceHead == 0)
             {
                 // The flow exists but has no grain yet (an idle mirror the
-                // route just woke up): wait for the first one instead of
-                // guessing a position and failing the bring-up.
-                auto const until = steadyNowNs() + kFirstGrainWaitNs;
-                while (sourceHead == 0 && _running.load() && steadyNowNs() < until)
+                // route just woke up; its replication can take seconds):
+                // wait for the first one in state init, instead of guessing
+                // a position and failing the bring-up. Only after
+                // kFirstGrainGiveUpNs does the bring-up fail (and retry).
+                auto const waitStart = steadyNowNs();
+                bool noted = false;
+                while (sourceHead == 0 && _running.load() && steadyNowNs() - waitStart < kFirstGrainGiveUpNs)
                 {
+                    if (!noted && steadyNowNs() - waitStart >= kFirstGrainNoteNs)
+                    {
+                        noted = true;
+                        log::info("preroll_no_grain_yet",
+                            {
+                                {"channel_index", _cfg.index},
+                                {"channel_label", _cfg.label},
+                                {"waited_ms", kFirstGrainNoteNs / 1'000'000ULL},
+                                {"details", "the source flow has no grain yet (an idle mirror?); waiting for its first grain"},
+                            });
+                    }
                     std::this_thread::sleep_for(std::chrono::milliseconds(2));
                     sourceHead = _videoReader->headIndex();
                 }
+                auto const waitedMs = (steadyNowNs() - waitStart) / 1'000'000ULL;
                 if (sourceHead == 0)
                 {
-                    log::warn("preroll_no_grain_yet",
-                        {
-                            {"channel_index", _cfg.index},
-                            {"channel_label", _cfg.label},
-                            {"waited_ms", kFirstGrainWaitNs / 1'000'000ULL},
-                            {"details", "the source flow has no grain yet"},
-                        });
+                    if (_running.load())
+                    {
+                        log::warn("preroll_no_grain",
+                            {
+                                {"channel_index", _cfg.index},
+                                {"channel_label", _cfg.label},
+                                {"waited_ms", waitedMs},
+                                {"details", "no grain from the source flow; the bring-up fails and retries"},
+                            });
+                    }
                     tearDownStreaming();
                     return false;
+                }
+                if (noted)
+                {
+                    log::info("preroll_first_grain", {{"channel_index", _cfg.index}, {"channel_label", _cfg.label}, {"waited_ms", waitedMs}});
                 }
                 // Let the source write the preroll's grains and the read
                 // offset past its first one (first + offset + preroll), so

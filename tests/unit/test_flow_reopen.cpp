@@ -1477,3 +1477,40 @@ TEST_CASE("each bring-up logs how the card's playback clock steps")
         video.reset();
     }
 }
+
+TEST_CASE("an idle mirror whose first grain needs 2.5 s: the output waits in init and comes up on that grain")
+{
+    // A mirror without demand can take seconds to replicate its first grain.
+    // That is no failure: no channel_bringup_failed, no failed state.
+    Rig rig("idlelong");
+    rig.withAudio();
+    auto audio = std::make_unique<AudioSource>(*rig.domain, rig.audio, kStamped);
+    auto video = std::make_unique<VideoSource>(*rig.domain, rig.video, kGen1, true);
+    std::this_thread::sleep_for(50ms);
+    LogCapture logs;
+    channel::OutputChannel out(rig.global, rig.ch, *rig.sub, *rig.domain, rig.metrics, "test");
+    out.start();
+    bool sawFailed = false;
+    auto const until = std::chrono::steady_clock::now() + 2500ms;
+    while (std::chrono::steady_clock::now() < until)
+    {
+        sawFailed = sawFailed || out.status().state.load() == channel::State::Failed;
+        std::this_thread::sleep_for(20ms);
+    }
+    CHECK_FALSE(sawFailed);
+    CHECK(out.status().state.load() == channel::State::Init);
+    video->paused = false; // the first grain
+    auto const firstGrain = std::chrono::steady_clock::now();
+    REQUIRE(waitUntil([&] { return out.status().state.load() == channel::State::Healthy; }, 2s));
+    CHECK(std::chrono::steady_clock::now() - firstGrain < 500ms);
+    CHECK(logs.of("channel_bringup_failed").empty());
+    CHECK(logs.of("preroll_no_grain").empty());
+    CHECK(logs.of("preroll_no_grain_yet").size() == 1);
+    CHECK(logs.of("preroll_first_grain").size() == 1);
+    CHECK(rig.reconnects() == 0.0);
+    REQUIRE(waitUntil([&] { return rig.played->pairCount() >= 30; }, 3s));
+    CHECK(rig.played->avOffset(5) == -rig.ch.outputPrerollGrains);
+    out.stop();
+    video.reset();
+    audio.reset();
+}
