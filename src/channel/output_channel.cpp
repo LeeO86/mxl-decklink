@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "output_channel.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <limits>
 #include <string>
@@ -27,6 +28,20 @@ namespace mxldl::channel
         // triggers a preroll reset.
         constexpr std::uint64_t kLateWindowNs = 10'000'000'000ULL;
         constexpr std::uint64_t kLateThreshold = 25;
+
+        // §2.4: a read in the completion callback leaves the card at least
+        // this much (or a quarter frame) before the frame is due.
+        constexpr std::uint64_t kScheduleMarginNs = 4'000'000ULL;
+
+        // §2.4: a source stall longer than this marks the channel degraded
+        // (as a flow missing for that long does, reopen_schedule.hpp).
+        constexpr std::uint64_t kStallDegradedNs = 1'000'000'000ULL;
+        // A stall is logged once it lasted this long (shorter ones are only
+        // counted in mxl_decklink_source_stalls_total).
+        constexpr std::uint64_t kStallLogNs = 200'000'000ULL;
+        // A source counts as stalled only after a wait at least this long
+        // with no progress (a shorter one says little about a live writer).
+        constexpr std::uint64_t kStallMinWaitNs = 5'000'000ULL;
 
         std::uint64_t steadyNowNs()
         {
@@ -73,6 +88,19 @@ namespace mxldl::channel
         };
         _framesTotal = &metrics.counter("mxl_decklink_frames_total", "Frames processed", labels);
         _framesDropped = &metrics.counter("mxl_decklink_frames_dropped_total", "Frames dropped", labels);
+        auto const withLabel = [&labels](char const* name, char const* value) {
+            auto out = labels;
+            out.emplace_back(name, value);
+            return out;
+        };
+        char const* const repeatedHelp = "Output frames that repeated the last frame because no new grain could be read";
+        _repeatedSourceStall = &metrics.counter("mxl_decklink_frames_repeated_total", repeatedHelp, withLabel("reason", "source_stall"));
+        _repeatedSourceLate = &metrics.counter("mxl_decklink_frames_repeated_total", repeatedHelp, withLabel("reason", "source_late"));
+        _repeatedFlowReopen = &metrics.counter("mxl_decklink_frames_repeated_total", repeatedHelp, withLabel("reason", "flow_reopen"));
+        _repeatedReadError = &metrics.counter("mxl_decklink_frames_repeated_total", repeatedHelp, withLabel("reason", "read_error"));
+        char const* const stallsHelp = "Output source stalls: an MXL flow stopped getting new grains or samples";
+        _stallsVideo = &metrics.counter("mxl_decklink_source_stalls_total", stallsHelp, withLabel("essence", "video"));
+        _stallsAudio = &metrics.counter("mxl_decklink_source_stalls_total", stallsHelp, withLabel("essence", "audio"));
         _framesLate = &metrics.counter("mxl_decklink_frames_late_total", "Frames displayed late", labels);
         _reconnectTotal = &metrics.counter("mxl_decklink_reconnect_total", "Channel reconnect attempts", labels);
         _flowReopens = &metrics.counter("mxl_decklink_flow_reopens_total", "MXL flows re-created by their writer; the reader was re-opened", labels);
@@ -195,6 +223,7 @@ namespace mxldl::channel
             }
 
             reopenInvalidReaders();
+            superviseStalls();
             waitForWork(std::chrono::milliseconds(100));
         }
     }
@@ -214,6 +243,11 @@ namespace mxldl::channel
         _reopenRequested.store(false);
         _reopen.clear();
         _reopenDegraded = false;
+        _videoStalled = false;
+        _stallSinceNs.store(0);
+        _stallDegraded = false;
+        _stallLogged = false;
+        _stallEventsLogged = _stallEvents.load();
         try
         {
             _mode = *_cfg.videoMode;
@@ -236,7 +270,7 @@ namespace mxldl::channel
                     });
                 return false;
             }
-            _videoReader = std::make_unique<mxlbridge::VideoReader>(readerDomain(), _cfg.videoFlowId.toString());
+            _videoReader = std::make_unique<mxlbridge::VideoReader>(readerDomain(_cfg.readerDomainPath), _cfg.videoFlowId.toString());
             _videoRate = _videoReader->grainRate();
             _videoConfig = _videoReader->configInfo();
             _audioFlows.clear();
@@ -249,7 +283,7 @@ namespace mxldl::channel
                     slot.cfg = afCfg;
                     if (!afCfg.flowId.isNil() && afCfg.mxlActive)
                     {
-                        slot.reader = std::make_unique<mxlbridge::AudioReader>(readerDomain(), afCfg.flowId.toString());
+                        slot.reader = std::make_unique<mxlbridge::AudioReader>(readerDomain(afCfg.readerDomainPath), afCfg.flowId.toString());
                         slot.config = slot.reader->configInfo();
                     }
                     // Nil UUID = unassigned: mapped DeckLink channels stay silent.
@@ -257,9 +291,11 @@ namespace mxldl::channel
                 }
             }
 
-            // The group gets its own instance of the readers' domain, so
+            // The group gets its own instance of the video's domain, so
             // other channels releasing readers never walk it (flowsync.hpp).
-            _sync = std::make_unique<mxlbridge::FlowSyncGroup>(readerDomain().path());
+            // It takes readers of any instance, so audio from another domain
+            // joins it too.
+            _sync = std::make_unique<mxlbridge::FlowSyncGroup>(readerDomain(_cfg.readerDomainPath).path());
             _sync->addReader(_videoReader->handle());
             for (auto const& af : _audioFlows)
             {
@@ -302,6 +338,18 @@ namespace mxldl::channel
                 return false;
             }
 
+            // §2.4: when a frame completes, the card still holds
+            // CHx_OUTPUT_PREROLL_GRAINS - 1 frames. A read in that callback
+            // waits at most that long, less a margin, or the card would show
+            // the next frame late; a source later than that repeats the last
+            // frame (reason source_late) instead.
+            {
+                auto const periodNs = 1'000'000'000ULL * static_cast<std::uint64_t>(_mode.rateDenominator) / static_cast<std::uint64_t>(_mode.rateNumerator);
+                auto const marginNs = std::max<std::uint64_t>(kScheduleMarginNs, periodNs / 4);
+                auto const ahead = static_cast<std::uint64_t>(_cfg.outputPrerollGrains > 1 ? _cfg.outputPrerollGrains - 1 : 0) * periodNs;
+                _frameWaitNs = std::min<std::uint64_t>(ahead > marginNs ? ahead - marginNs : 0, static_cast<std::uint64_t>(_cfg.readerTimeoutMs) * 1'000'000ULL);
+            }
+
             auto const rate = _videoRate;
             _samplesPerFrame = static_cast<std::size_t>(48000ULL * static_cast<std::uint64_t>(rate.denominator) /
                                                         static_cast<std::uint64_t>(rate.numerator));
@@ -314,6 +362,9 @@ namespace mxldl::channel
                 std::lock_guard const lock{_scheduleMutex};
                 _nextGrainIndex = currentIndex > preroll ? currentIndex - preroll : 0;
                 _scheduledFrames = 0;
+                _lastCompletionNs = 0;
+                _lastCallbackNs = 0;
+                _readDeadlineNs = 0;
                 _recentLateOrDropped = 0;
                 _recentWindowStart = util::taiNowNs();
                 if (!_audioFlows.empty())
@@ -329,7 +380,7 @@ namespace mxldl::channel
                     std::lock_guard const lock{_scheduleMutex};
                     idx = _nextGrainIndex++;
                 }
-                if (!scheduleGrain(idx))
+                if (!scheduleGrain(idx, static_cast<std::uint64_t>(_cfg.readerTimeoutMs) * 1'000'000ULL))
                 {
                     log::warn("preroll_grain_unavailable",
                         {
@@ -415,24 +466,39 @@ namespace mxldl::channel
         audioFlows.clear();
     }
 
-    bool OutputChannel::scheduleGrain(std::uint64_t grainIndex)
+    bool OutputChannel::scheduleGrain(std::uint64_t grainIndex, std::uint64_t waitNs)
     {
         mxlbridge::VideoReader::Grain grain;
         mxlStatus status = MXL_ERR_UNKNOWN;
         // While the supervisor re-opens a re-created video flow there is no
         // reader to read: the last frame is repeated below.
+        auto reason = RepeatReason::FlowReopen;
         if (_videoReader && !_videoFlowInvalid)
         {
-            auto const timeoutNs = static_cast<std::uint64_t>(_cfg.readerTimeoutMs) * 1'000'000ULL;
-            auto grainTimeoutNs = timeoutNs;
+            auto const timeoutNs = waitNs;
+            // A stalled source is not waited for: each wait would hold this
+            // DeckLink callback for CHx_READER_TIMEOUT_MS, the card would run
+            // out of frames and report them late (§2.4 source stall).
+            std::uint64_t grainTimeoutNs = _videoStalled ? 0 : timeoutNs;
+            // Heads before the wait: a source whose head does not move during
+            // a full wait has stopped; one that moves is only late.
+            auto const headBefore = _videoReader->headIndex();
+            for (auto& af : _audioFlows)
+            {
+                if (af.reader && !af.flowInvalid && !af.stalled)
+                {
+                    af.headBefore = af.reader->headIndex();
+                }
+            }
             if (_sync)
             {
                 auto const timestamp = ::mxlIndexToTimestamp(&_videoRate, grainIndex);
                 if (timestamp != std::numeric_limits<std::uint64_t>::max())
                 {
                     // One wait covers the video grain and the audio sample at
-                    // the same TAI time. A successful wait means the grain
-                    // fetch below should not block.
+                    // the same TAI time. Stalled readers are out of the
+                    // group, so it does not wait for them (an empty group
+                    // returns at once).
                     auto const waited = _sync->waitFor(timestamp, timeoutNs);
                     if (waited == MXL_STATUS_OK)
                     {
@@ -447,6 +513,16 @@ namespace mxldl::channel
                         findInvalidReaders();
                         grainTimeoutNs = 0;
                     }
+                    else
+                    {
+                        // The wait used this frame's time: no second wait for
+                        // the grain.
+                        if ((waited == MXL_ERR_OUT_OF_RANGE_TOO_EARLY || waited == MXL_ERR_TIMEOUT) && timeoutNs >= kStallMinWaitNs)
+                        {
+                            markStalledAudio();
+                        }
+                        grainTimeoutNs = 0;
+                    }
                 }
             }
             if (!_videoFlowInvalid)
@@ -455,6 +531,45 @@ namespace mxldl::channel
                 if (status == MXL_ERR_FLOW_INVALID)
                 {
                     markVideoFlowInvalid();
+                }
+                else
+                {
+                    auto const head = _videoReader->headIndex();
+                    if (status == MXL_STATUS_OK)
+                    {
+                        reason = RepeatReason::ReadError; // when the grain is marked invalid
+                        setVideoStalled(false);
+                    }
+                    else if (status == MXL_ERR_OUT_OF_RANGE_TOO_EARLY || status == MXL_ERR_TIMEOUT)
+                    {
+                        if (_videoStalled)
+                        {
+                            reason = RepeatReason::SourceStall;
+                            if (head != _videoStallHead)
+                            {
+                                // The source writes again: wait for the next
+                                // grain as usual (this one is repeated).
+                                setVideoStalled(false);
+                            }
+                        }
+                        else if (head == headBefore && timeoutNs >= kStallMinWaitNs)
+                        {
+                            // Not one grain during the whole wait: the
+                            // source stopped.
+                            reason = RepeatReason::SourceStall;
+                            setVideoStalled(true);
+                        }
+                        else
+                        {
+                            // The source writes, but later than the card can
+                            // wait for.
+                            reason = RepeatReason::SourceLate;
+                        }
+                    }
+                    else
+                    {
+                        reason = RepeatReason::ReadError;
+                    }
                 }
             }
         }
@@ -472,10 +587,11 @@ namespace mxldl::channel
         }
         else if (!_lastFrame.empty())
         {
-            // Reader timeout, invalid grain, or a re-created flow being
+            // A stalled source, an invalid grain, or a re-created flow being
             // re-opened: repeat the previous frame so the output stays
-            // continuous; counted as a drop (§2.4), but not towards the
-            // late/drop preroll reset, which counts DeckLink completions only.
+            // continuous. Counted by reason in frames_repeated_total, not as
+            // a drop, and never towards the late/drop preroll reset, which
+            // counts DeckLink completions only (§2.4).
             bytes = _lastFrame.data();
             size = _lastFrame.size();
             repeated = true;
@@ -496,8 +612,14 @@ namespace mxldl::channel
         _status.framesTotal.fetch_add(1);
         if (repeated)
         {
-            _framesDropped->inc();
-            _status.framesDropped.fetch_add(1);
+            switch (reason)
+            {
+                case RepeatReason::SourceStall: _repeatedSourceStall->inc(); break;
+                case RepeatReason::SourceLate: _repeatedSourceLate->inc(); break;
+                case RepeatReason::FlowReopen: _repeatedFlowReopen->inc(); break;
+                case RepeatReason::ReadError: _repeatedReadError->inc(); break;
+            }
+            _status.framesRepeated.fetch_add(1);
         }
         else
         {
@@ -509,6 +631,7 @@ namespace mxldl::channel
 
     void OutputChannel::onFrameCompleted(std::uint64_t /*frameId*/, dl::CompletionResult result)
     {
+        auto const deliveredNs = steadyNowNs(); // before the lock: when the card called
         std::lock_guard const callbackLock{_callbackMutex};
         if (!_playing.load())
         {
@@ -548,11 +671,35 @@ namespace mxldl::channel
             std::lock_guard const lock{_scheduleMutex};
             idx = _nextGrainIndex++;
         }
-        if (!scheduleGrain(idx))
+        // When did this frame complete? The call time, unless the previous
+        // callback held the card's calls up (it waited for a late or stalled
+        // source): then one frame after the previous completion. The read
+        // waits at most until that time plus _frameWaitNs, so waits in
+        // consecutive callbacks do not add up beyond what the card holds.
+        auto const periodNs = 1'000'000'000ULL * static_cast<std::uint64_t>(_mode.rateDenominator) / static_cast<std::uint64_t>(_mode.rateNumerator);
+        auto completedNs = deliveredNs;
+        if (_lastCompletionNs != 0 && _lastCallbackNs > periodNs / 2)
+        {
+            completedNs = std::min<std::uint64_t>(deliveredNs, _lastCompletionNs + periodNs);
+        }
+        _lastCompletionNs = completedNs;
+        _readDeadlineNs = completedNs + _frameWaitNs;
+        if (!scheduleGrain(idx, readBudgetNs()))
         {
             _framesDropped->inc();
             _status.framesDropped.fetch_add(1);
         }
+        _lastCallbackNs = steadyNowNs() - deliveredNs;
+    }
+
+    std::uint64_t OutputChannel::readBudgetNs() const
+    {
+        if (_readDeadlineNs == 0)
+        {
+            return _frameWaitNs; // no frame completed yet
+        }
+        auto const now = steadyNowNs();
+        return _readDeadlineNs > now ? std::min(_readDeadlineNs - now, _frameWaitNs) : 0;
     }
 
     void OutputChannel::onRenderAudio(bool /*preroll*/)
@@ -565,7 +712,9 @@ namespace mxldl::channel
         std::lock_guard const lock{_scheduleMutex};
         _nextAudioEndIndex += _samplesPerFrame;
         auto const deckChannels = static_cast<std::size_t>(_cfg.audioChannelCount);
-        auto const timeoutNs = static_cast<std::uint64_t>(_cfg.readerTimeoutMs) * 1'000'000ULL;
+        // Same deadline as the last video read: this callback holds
+        // _callbackMutex, so its wait delays the next video completion.
+        auto const timeoutNs = readBudgetNs();
         auto const sampleCount = _samplesPerFrame * deckChannels;
 
         void* pcm = nullptr;
@@ -589,51 +738,83 @@ namespace mxldl::channel
             {
                 continue; // nil UUID, or a re-created flow being re-opened → silent
             }
-            auto const status =
-                af.reader->readSamples(_nextAudioEndIndex, _samplesPerFrame, timeoutNs, pcm, deckChannels, af.cfg.deckLinkChannels, _cfg.audioSampleType);
-            if (status == MXL_STATUS_OK)
+            // A stalled flow is read without waiting, so it cannot hold the
+            // DeckLink callbacks (§2.4 source stall); its channels stay silent.
+            auto const headBefore = af.reader->headIndex();
+            auto const status = af.reader->readSamples(_nextAudioEndIndex, _samplesPerFrame, af.stalled ? 0 : timeoutNs, pcm, deckChannels,
+                af.cfg.deckLinkChannels, _cfg.audioSampleType);
+            if (status == MXL_ERR_FLOW_INVALID)
+            {
+                markAudioFlowInvalid(slot);
+                continue;
+            }
+            auto const head = af.reader->headIndex();
+            if (af.stalled)
+            {
+                // Samples written before the source stopped are still played
+                // (the audio read position trails the video's). The stall
+                // ends when the source writes again; the next block then
+                // waits as usual.
+                anyOk = anyOk || status == MXL_STATUS_OK;
+                if (head != af.stallHead)
+                {
+                    setAudioStalled(slot, false);
+                }
+            }
+            else if (status == MXL_STATUS_OK)
             {
                 anyOk = true;
             }
-            else if (status == MXL_ERR_OUT_OF_RANGE_TOO_EARLY)
+            else if (status == MXL_ERR_OUT_OF_RANGE_TOO_EARLY || status == MXL_ERR_TIMEOUT)
             {
-                tooEarly = true;
-            }
-            else if (status == MXL_ERR_FLOW_INVALID)
-            {
-                markAudioFlowInvalid(slot);
+                if (head == headBefore && timeoutNs >= kStallMinWaitNs)
+                {
+                    // Not one sample during the whole wait: the source
+                    // stopped.
+                    setAudioStalled(slot, true);
+                }
+                else
+                {
+                    tooEarly = true; // the source writes; this block is ahead of it
+                }
             }
         }
 
-        if (anyOk)
+        if (anyOk || !tooEarly)
         {
+            // Silent where nothing could be read (unassigned, re-opening or
+            // stalled flows): the card's audio clock stays filled and the
+            // sample index stays on the video's TAI grid, so audio is in sync
+            // again when a stalled source resumes.
             _playback->scheduleAudio(pcm, static_cast<std::uint32_t>(_samplesPerFrame));
-        }
-        else if (tooEarly)
-        {
-            // Producer not there yet; skip this cycle and resync the index to
-            // the video grain grid on the next successful video grain.
-            _nextAudioEndIndex -= _samplesPerFrame;
         }
         else
         {
-            // All assigned readers failed (or only nil slots): still schedule
-            // silence so DeckLink audio clock stays filled.
-            _playback->scheduleAudio(pcm, static_cast<std::uint32_t>(_samplesPerFrame));
+            // A live source not there yet: skip this cycle and read the same
+            // block next time.
+            _nextAudioEndIndex -= _samplesPerFrame;
         }
     }
 
-    mxlbridge::Domain& OutputChannel::readerDomain()
+    mxlbridge::Domain& OutputChannel::readerDomain(std::string const& legDomainPath)
     {
         // Always a private instance, also for this function's own domain:
         // re-opening a re-created flow needs the last reference to the stale
-        // reader on the instance to go (see _readerDomain).
-        auto const& path = _cfg.readerDomainPath.empty() ? _domain.path() : _cfg.readerDomainPath;
-        if (!_readerDomain || _readerDomain->path() != path)
+        // reader on the instance to go (see _readerDomains). One instance per
+        // domain: a reader opens a flow of its instance's domain only.
+        auto const& path = legDomainPath.empty() ? _domain.path() : legDomainPath;
+        for (auto const& d : _readerDomains)
         {
-            _readerDomain = std::make_unique<mxlbridge::Domain>(path);
+            if (d->path() == path)
+            {
+                return *d;
+            }
         }
-        return *_readerDomain;
+        // Another function's domain is opened, never created: a restored
+        // route waits until that function made it (§7.7).
+        auto const missing = path == _domain.path() ? mxlbridge::Domain::Missing::Create : mxlbridge::Domain::Missing::Fail;
+        _readerDomains.push_back(std::make_unique<mxlbridge::Domain>(path, missing));
+        return *_readerDomains.back();
     }
 
     void OutputChannel::requestReopen()
@@ -656,6 +837,9 @@ namespace mxldl::channel
         {
             _sync->removeReader(_videoReader->handle());
         }
+        // The re-open takes over from a stall (repeats count as flow_reopen).
+        _videoStalled = false;
+        updateStallClock();
         requestReopen();
     }
 
@@ -670,6 +854,7 @@ namespace mxldl::channel
             if (af.reader && !af.flowInvalid && af.cfg.flowId == flowId)
             {
                 af.flowInvalid = true;
+                af.stalled = false;
                 if (_sync)
                 {
                     _sync->removeReader(af.reader->handle());
@@ -679,6 +864,7 @@ namespace mxldl::channel
         }
         if (marked)
         {
+            updateStallClock();
             requestReopen();
         }
     }
@@ -721,7 +907,7 @@ namespace mxldl::channel
             if (!_reopenDegraded && _reopen.degraded(now))
             {
                 _reopenDegraded = true;
-                setState(State::Degraded);
+                updateRunningState();
             }
             return;
         }
@@ -801,7 +987,7 @@ namespace mxldl::channel
         {
             try
             {
-                newVideo = std::make_unique<mxlbridge::VideoReader>(readerDomain(), _cfg.videoFlowId.toString());
+                newVideo = std::make_unique<mxlbridge::VideoReader>(readerDomain(_cfg.readerDomainPath), _cfg.videoFlowId.toString());
                 formatChanged = formatChanged || !sameVideoFormat(newVideo->configInfo(), _videoConfig);
             }
             catch (std::exception const& e)
@@ -814,7 +1000,7 @@ namespace mxldl::channel
             auto const& af = _audioFlows[slot];
             try
             {
-                auto reader = std::make_unique<mxlbridge::AudioReader>(readerDomain(), af.cfg.flowId.toString());
+                auto reader = std::make_unique<mxlbridge::AudioReader>(readerDomain(af.cfg.readerDomainPath), af.cfg.flowId.toString());
                 formatChanged = formatChanged || !sameAudioFormat(reader->configInfo(), af.config);
                 newAudio.emplace_back(slot, std::move(reader));
             }
@@ -851,6 +1037,7 @@ namespace mxldl::channel
                 auto& af = _audioFlows[slot];
                 af.reader = std::move(reader);
                 af.flowInvalid = false;
+                af.stalled = false;
                 if (_sync)
                 {
                     _sync->addReader(af.reader->handle());
@@ -882,7 +1069,7 @@ namespace mxldl::channel
             if (!_reopenDegraded && _reopen.degraded(now))
             {
                 _reopenDegraded = true;
-                setState(State::Degraded);
+                updateRunningState();
             }
             return;
         }
@@ -898,7 +1085,169 @@ namespace mxldl::channel
         if (_reopenDegraded)
         {
             _reopenDegraded = false;
-            setState(State::Healthy);
+            updateRunningState();
+        }
+    }
+
+    void OutputChannel::updateRunningState()
+    {
+        if (!_streamingUp.load())
+        {
+            return;
+        }
+        setState(_reopenDegraded || _stallDegraded ? State::Degraded : State::Healthy);
+    }
+
+    void OutputChannel::setVideoStalled(bool stalled)
+    {
+        if (_videoStalled == stalled || !_videoReader)
+        {
+            return;
+        }
+        _videoStalled = stalled;
+        _videoStallHead = stalled ? _videoReader->headIndex() : 0;
+        if (_sync)
+        {
+            try
+            {
+                if (stalled)
+                {
+                    _sync->removeReader(_videoReader->handle());
+                }
+                else
+                {
+                    _sync->addReader(_videoReader->handle());
+                }
+            }
+            catch (std::exception const& e)
+            {
+                log::warn("sync_group_add_failed", {{"channel_index", _cfg.index}, {"essence", "video"}, {"details", e.what()}});
+            }
+        }
+        if (stalled)
+        {
+            _stallsVideo->inc();
+        }
+        updateStallClock();
+    }
+
+    void OutputChannel::setAudioStalled(std::size_t slot, bool stalled)
+    {
+        auto const& reader = _audioFlows[slot].reader;
+        if (!reader || _audioFlows[slot].stalled == stalled)
+        {
+            return;
+        }
+        // Slots that read the same flow share one MXL reader (and one group
+        // entry): they stall and resume together.
+        auto const handle = reader->handle();
+        auto const head = stalled ? reader->headIndex() : 0;
+        for (auto& af : _audioFlows)
+        {
+            if (af.reader && !af.flowInvalid && af.reader->handle() == handle)
+            {
+                af.stalled = stalled;
+                af.stallHead = head;
+            }
+        }
+        if (_sync)
+        {
+            try
+            {
+                if (stalled)
+                {
+                    _sync->removeReader(handle);
+                }
+                else
+                {
+                    _sync->addReader(handle);
+                }
+            }
+            catch (std::exception const& e)
+            {
+                log::warn("sync_group_add_failed", {{"channel_index", _cfg.index}, {"essence", "audio"}, {"details", e.what()}});
+            }
+        }
+        if (stalled)
+        {
+            _stallsAudio->inc();
+        }
+        updateStallClock();
+    }
+
+    void OutputChannel::markStalledAudio()
+    {
+        // Video decides on its own grain read. An audio flow that wrote
+        // nothing during the whole wait stopped, even when it still has the
+        // sample at this frame's time (the audio read trails the video):
+        // out of the group, or every later wait would block on it, and read
+        // without waiting, or its own read would hold the callbacks. A live
+        // flow taken for stalled loses nothing: a read without waiting still
+        // gets the samples that are there, and the next write ends the stall.
+        for (std::size_t slot = 0; slot < _audioFlows.size(); ++slot)
+        {
+            auto const& af = _audioFlows[slot];
+            if (af.reader && !af.flowInvalid && !af.stalled && af.reader->headIndex() == af.headBefore)
+            {
+                setAudioStalled(slot, true);
+            }
+        }
+    }
+
+    void OutputChannel::updateStallClock()
+    {
+        bool any = _videoStalled;
+        for (auto const& af : _audioFlows)
+        {
+            any = any || (af.stalled && af.reader && !af.flowInvalid);
+        }
+        auto const since = _stallSinceNs.load();
+        if (any && since == 0)
+        {
+            _stallSinceNs.store(steadyNowNs());
+            _stallEvents.fetch_add(1);
+        }
+        else if (!any && since != 0)
+        {
+            _lastStallNs.store(steadyNowNs() - since);
+            _stallSinceNs.store(0);
+        }
+    }
+
+    void OutputChannel::superviseStalls()
+    {
+        auto const since = _stallSinceNs.load();
+        auto const now = steadyNowNs();
+        auto const repeats = _repeatedSourceStall->value();
+        // Short stalls are only counted; one that lasts is logged once.
+        if (since != 0 && !_stallLogged && now - since >= kStallLogNs)
+        {
+            log::warn("source_stall",
+                {
+                    {"channel_index", _cfg.index},
+                    {"channel_label", _cfg.label},
+                    {"details", "an MXL flow gets no new grains or samples: video repeats the last frame, stalled audio is silent"},
+                });
+            _stallLogged = true;
+            _stallRepeatsAtStart = repeats;
+            _stallEventsLogged = _stallEvents.load();
+        }
+        else if (_stallLogged && (since == 0 || _stallEvents.load() != _stallEventsLogged))
+        {
+            log::info("source_stall_ended",
+                {
+                    {"channel_index", _cfg.index},
+                    {"channel_label", _cfg.label},
+                    {"duration_ms", _lastStallNs.load() / 1'000'000ULL},
+                    {"frames_repeated", static_cast<std::uint64_t>(repeats - _stallRepeatsAtStart)},
+                });
+            _stallLogged = false;
+        }
+        bool const degraded = since != 0 && now - since >= kStallDegradedNs;
+        if (degraded != _stallDegraded)
+        {
+            _stallDegraded = degraded;
+            updateRunningState();
         }
     }
 

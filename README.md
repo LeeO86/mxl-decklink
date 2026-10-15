@@ -28,7 +28,12 @@ MXL v1.1 API rather than the spec's paraphrase of it).
   fail-fast (exit 2) on external profile changes. Output channels re-open
   an MXL reader whose flow was re-created under the same id
   (`MXL_ERR_FLOW_INVALID`) and repeat the last frame meanwhile
-  (`mxl_decklink_flow_reopens_total`, log `mxl_flow_recreated`).
+  (`mxl_decklink_flow_reopens_total`, log `mxl_flow_recreated`). When a
+  source stalls (its flow stays, no new grains), the output repeats the last
+  frame and plays silence without a preroll reset, and is `degraded` after
+  1 s (`mxl_decklink_frames_repeated_total{reason="source_stall"}`,
+  `mxl_decklink_source_stalls_total`, log `source_stall`). The preroll reset
+  is left to output-side trouble (frames the card shows late or drops).
 - **Ops + web control** (spec §7.1 / §7.5): one consolidated HTTP port
   `WEB_PORT` (default 8080) serves `/livez`, `/readyz`, `/statusz`, Prometheus
   `/metrics`, and — when `WEB_ENABLE=true` — the embedded Vue SPA + REST API
@@ -44,7 +49,10 @@ MXL v1.1 API rather than the spec's paraphrase of it).
   MXL ([BCP-007-03](https://specs.amwa.tv/bcp-007-03/)). Input channels are MXL
   senders, output channels are MXL receivers (`urn:x-nmos:transport:mxl`).
   A controller connects them with `mxl_domain_id` and `mxl_flow_id`; there is
-  no SDP. This is separate from a DeckLink IP card's own ST 2110 NMOS node.
+  no SDP. Each receiver has its own domain, so an output's video and audio
+  may come from different functions. Activations are saved and restored
+  after a restart (`NMOS_RESUME_CONNECTIONS`, `state/connections.json`).
+  This is separate from a DeckLink IP card's own ST 2110 NMOS node.
 - **Config**: environment variables, optionally layered over a JSON
   configuration file (`MXL_CONFIG_FILE`, spec §4.5) that the web interface
   persists to. Precedence: env > file > default; env-set keys are shown
@@ -130,9 +138,21 @@ registration.
 Senders write `MXL_OUTPUT_DOMAIN_DIR` (`MXL_DOMAIN_PATH` is the same setting).
 Its `domain_def.json` `id` is `mxl_domain_id`. Receivers may read any domain
 under `MXL_DOMAIN_SCAN_PATH`, also one created after the start: an activation
-that names an unknown domain scans the path again. `master_enable` starts and stops that
+that names an unknown domain scans the path again. Each receiver keeps its own
+domain: an output's video can come from one function and its audio from
+another. `master_enable` starts and stops that
 leg's MXL writer or reader and is stored in the config file when the
 environment does not already pin `CHx_MXL_ACTIVE` / `CHx_AFn_MXL_ACTIVE`.
+
+**Restart.** With `NMOS_RESUME_CONNECTIONS=true` (default) every applied
+activation is saved to `state/connections.json` next to the config file
+(`$CONFIG_DIR/state/connections.json`; mount `CONFIG_DIR` writable to keep
+it). At the next start the node applies the saved routes before the channels
+start and shows them in IS-05 `/active`, so SDI comes back without a
+controller. Saved routes win over flow ids from the environment. A receiver
+whose domain or flow is not there yet waits for it; a saved route that is no
+longer valid comes up with `master_enable` false (log
+`restored_activation_disabled`). Spec §7.7.
 
 ### Exit codes
 
@@ -318,8 +338,9 @@ Documented in detail in IMPLEMENTATION_PLAN.md §3:
   the same TAI time are available. Each channel's group lives on its own MXL
   instance of the domain: MXL walks the groups of a reader's instance without
   locking them when a reader is released. The channel's readers live on
-  another instance of its own (not the one shared with the writers), so a
-  re-created flow can be re-opened without the other channels.
+  instances of its own, one per domain it reads (not the one shared with the
+  writers), so a re-created flow can be re-opened without the other channels
+  and video and audio may come from different domains.
 - **Grain commit semantics** follow the real API (`validSlices`/`totalSlices`
   and `MXL_GRAIN_FLAG_INVALID`) rather than the spec's `committedSize` field.
 

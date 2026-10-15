@@ -56,7 +56,23 @@ namespace mxldl::channel
             /// The writer re-created the flow: the reader is out of the sync
             /// group and not read until the supervisor re-opened it.
             bool flowInvalid = false;
+            /// The source stopped writing (§2.4 source stall): the reader is
+            /// out of the sync group and read without waiting; its DeckLink
+            /// channels play silence until samples come again.
+            bool stalled = false;
+            std::uint64_t stallHead = 0; // head index when the stall began
+            std::uint64_t headBefore = 0; // head index before the frame's sync wait
             mxlFlowConfigInfo config{}; // at bring-up
+        };
+
+        /// Why a frame was repeated instead of read (§2.4); a label of
+        /// mxl_decklink_frames_repeated_total.
+        enum class RepeatReason
+        {
+            SourceStall, // the source stopped writing; the flow is still there
+            SourceLate, // the source writes, but its grain came too late for the card
+            FlowReopen, // the flow was re-created; its reader is being re-opened
+            ReadError, // an invalid grain or another read error
         };
 
         void supervisorLoop();
@@ -64,7 +80,11 @@ namespace mxldl::channel
         void tearDownStreaming();
         void onFrameCompleted(std::uint64_t frameId, dl::CompletionResult result);
         void onRenderAudio(bool preroll);
-        bool scheduleGrain(std::uint64_t grainIndex);
+        /// Reads grain `grainIndex` (waiting at most `waitNs`) and schedules
+        /// it, or repeats the last frame.
+        bool scheduleGrain(std::uint64_t grainIndex, std::uint64_t waitNs);
+        /// How long a read may still wait (_callbackMutex held).
+        [[nodiscard]] std::uint64_t readBudgetNs() const;
         void prerollResetRequested();
 
         // MXL_ERR_FLOW_INVALID handling (§2.4). The mark* and find* calls run
@@ -79,17 +99,36 @@ namespace mxldl::channel
         void reopenInvalidReaders();
         void waitForWork(std::chrono::milliseconds timeout);
 
-        [[nodiscard]] mxlbridge::Domain& readerDomain();
+        // Source stalls (§2.4). Called with _callbackMutex held.
+        void setVideoStalled(bool stalled);
+        void setAudioStalled(std::size_t slot, bool stalled);
+        /// After a sync-group wait timed out: the audio readers whose source
+        /// wrote nothing during the wait are stalled.
+        void markStalledAudio();
+        void updateStallClock();
+        /// Supervisor thread: logs stall start/end and keeps the channel
+        /// `degraded` while a stall lasts longer than 1 s.
+        void superviseStalls();
+        /// Supervisor thread: healthy or degraded from the re-open and stall
+        /// conditions.
+        void updateRunningState();
+
+        /// The channel's MXL instance of one domain directory (empty = this
+        /// function's domain), created on first use and kept for the life of
+        /// the channel.
+        [[nodiscard]] mxlbridge::Domain& readerDomain(std::string const& legDomainPath);
 
         config::Config const& _globalCfg;
         config::ChannelConfig _cfg;
         dl::ISubDevice& _subDevice;
         mxlbridge::Domain& _domain;
-        /// The channel's own MXL instance for its readers. MXL keeps one
-        /// reader per flow id and instance and hands it out again while any
-        /// holder keeps it, so a stale reader shared with another channel
-        /// could not be re-opened.
-        std::unique_ptr<mxlbridge::Domain> _readerDomain;
+        /// The channel's own MXL instances for its readers, one per domain
+        /// directory its receivers read (video and audio may come from
+        /// different domains). MXL keeps one reader per flow id and instance
+        /// and hands it out again while any holder keeps it, so a stale reader
+        /// shared with another channel could not be re-opened. Never shrinks
+        /// while the channel lives: readers refer to their instance.
+        std::vector<std::unique_ptr<mxlbridge::Domain>> _readerDomains;
         std::string _cardIdLabel;
 
         Status _status;
@@ -114,7 +153,12 @@ namespace mxldl::channel
         std::mutex _callbackMutex;
         std::uint64_t _nextGrainIndex = 0;
         std::uint64_t _scheduledFrames = 0;
-        std::vector<std::uint8_t> _lastFrame; // repeated on reader timeout
+        std::uint64_t _frameWaitNs = 0; // longest read wait in a completion callback
+        // Read deadline of the completion callbacks (§2.4), _callbackMutex.
+        std::uint64_t _lastCompletionNs = 0; // steady ns, estimated
+        std::uint64_t _lastCallbackNs = 0; // duration of the previous completion callback
+        std::uint64_t _readDeadlineNs = 0; // 0 = no frame completed yet
+        std::vector<std::uint8_t> _lastFrame; // repeated when no grain can be read
         // Int32-aligned PCM scratch (DeckLink sample type is usually 32-bit;
         // Int16 uses a parallel buffer to avoid misaligned casts).
         std::vector<std::int32_t> _audioScratchInt32;
@@ -137,11 +181,29 @@ namespace mxldl::channel
         ReopenSchedule _reopen; // supervisor thread only
         bool _reopenDegraded = false; // supervisor thread only
 
+        // Source stalls (§2.4): flags under _callbackMutex, clock atomics for
+        // the supervisor.
+        bool _videoStalled = false;
+        std::uint64_t _videoStallHead = 0; // head index when the stall began
+        std::atomic<std::uint64_t> _stallSinceNs{0}; // steady ns; 0 = no reader stalled
+        std::atomic<std::uint64_t> _stallEvents{0};
+        std::atomic<std::uint64_t> _lastStallNs{0}; // duration of the last finished stall
+        std::uint64_t _stallEventsLogged = 0; // supervisor thread only
+        bool _stallLogged = false; // supervisor thread only
+        double _stallRepeatsAtStart = 0; // supervisor thread only
+        bool _stallDegraded = false; // supervisor thread only
+
         ops::Counter* _framesTotal = nullptr;
         ops::Counter* _framesDropped = nullptr;
         ops::Counter* _framesLate = nullptr;
         ops::Counter* _reconnectTotal = nullptr;
         ops::Counter* _flowReopens = nullptr;
+        ops::Counter* _repeatedSourceStall = nullptr;
+        ops::Counter* _repeatedSourceLate = nullptr;
+        ops::Counter* _repeatedFlowReopen = nullptr;
+        ops::Counter* _repeatedReadError = nullptr;
+        ops::Counter* _stallsVideo = nullptr;
+        ops::Counter* _stallsAudio = nullptr;
         ops::Gauge* _stateGauge = nullptr;
         ops::Gauge* _bufferedVideoGauge = nullptr;
         ops::Gauge* _bufferedAudioGauge = nullptr;

@@ -622,7 +622,7 @@ namespace mxldl::config
                a.webPort == b.webPort && a.nmosEnable == b.nmosEnable && a.nmosPort == b.nmosPort && a.nmosLabel == b.nmosLabel &&
                a.nmosSeed == b.nmosSeed && a.nmosTags == b.nmosTags && a.nmosRegistryAddress == b.nmosRegistryAddress &&
                a.nmosRegistryPort == b.nmosRegistryPort && a.nmosQueryAddress == b.nmosQueryAddress && a.nmosQueryPort == b.nmosQueryPort &&
-               a.nmosDnsSd == b.nmosDnsSd && a.nmosHostAddress == b.nmosHostAddress && a.outputDomainId == b.outputDomainId &&
+               a.nmosDnsSd == b.nmosDnsSd && a.nmosResumeConnections == b.nmosResumeConnections && a.nmosHostAddress == b.nmosHostAddress && a.outputDomainId == b.outputDomainId &&
                a.historyDurationNs == b.historyDurationNs && a.configDir == b.configDir && a.cleanupOnExit == b.cleanupOnExit &&
                a.domainScanPath == b.domainScanPath && a.minHealthyChannels == b.minHealthyChannels &&
                a.signalLossTimeoutS == b.signalLossTimeoutS && a.startupMaxRetries == b.startupMaxRetries &&
@@ -859,6 +859,10 @@ namespace mxldl::config
         if (auto const v = env.get("NMOS_DNS_SD"))
         {
             cfg.nmosDnsSd = parseBool("NMOS_DNS_SD", *v);
+        }
+        if (auto const v = env.get("NMOS_RESUME_CONNECTIONS"))
+        {
+            cfg.nmosResumeConnections = parseBool("NMOS_RESUME_CONNECTIONS", *v);
         }
         if (auto const v = env.get("NMOS_HOST_ADDRESS"))
         {

@@ -8,9 +8,13 @@
 
 namespace mxldl::mxlbridge
 {
-    Domain::Domain(std::string domainPath)
+    Domain::Domain(std::string domainPath, Missing missing)
         : _path(std::move(domainPath))
     {
+        if (missing == Missing::Fail && !std::filesystem::is_directory(_path))
+        {
+            throw std::runtime_error("MXL domain directory does not exist (yet): " + _path);
+        }
         // Create the directory when missing so a first deploy can start with
         // only defaults (operators still should put it on tmpfs).
         if (!std::filesystem::is_directory(_path))

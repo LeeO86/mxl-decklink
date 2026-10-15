@@ -39,7 +39,12 @@ namespace mxldl::channel
         std::atomic<std::uint64_t> lastFrameTaiNs{0};
         std::atomic<bool> signalLocked{false};
         std::atomic<std::uint64_t> framesTotal{0};
+        /// Inputs: frames lost. Outputs: frames the card dropped or that
+        /// could not be scheduled (output-side trouble).
         std::atomic<std::uint64_t> framesDropped{0};
+        /// Outputs: frames that repeated the last frame because no new grain
+        /// could be read (source stall, flow re-open, read error).
+        std::atomic<std::uint64_t> framesRepeated{0};
         std::atomic<std::uint64_t> reconnects{0};
         std::atomic<std::uint64_t> grainsCommitted{0};
         /// Output only: DeckLink `GetBufferedAudioSampleFrameCount` (sample

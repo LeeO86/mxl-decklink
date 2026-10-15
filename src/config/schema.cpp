@@ -68,6 +68,8 @@ namespace mxldl::config
                     "Query API port. Defaults to NMOS_REGISTRY_PORT + 1.", true},
                 {"NMOS_DNS_SD", SettingKind::Global, "bool", {}, "false",
                     "When false, DNS-SD browsing and mDNS self-advertisement are both off (no Avahi required).", true},
+                {"NMOS_RESUME_CONNECTIONS", SettingKind::Global, "bool", {}, "true",
+                    "Restore the last IS-05 activation of every MXL sender and receiver after a restart (state/connections.json next to the config file).", true},
                 {"NMOS_HOST_ADDRESS", SettingKind::Global, "string", {}, "",
                     "IP address literal announced in IS-04 and IS-05. Default: first non-loopback IPv4.", true},
                 {"CONFIG_DIR", SettingKind::Global, "path", {}, "/config",
@@ -125,7 +127,7 @@ namespace mxldl::config
                 {"AUDIO_BUFFER_MS", SettingKind::Channel, "int", {}, "200", "Requested audio ring length in ms.", false},
                 {"COMMIT_BATCH_HINT", SettingKind::Channel, "int", {}, "", "maxCommitBatchSizeHint for the flow writers.", false},
                 {"OUTPUT_PREROLL_GRAINS", SettingKind::Channel, "int", {}, "3", "Output channels: grains buffered before playback start.", false},
-                {"READER_TIMEOUT_MS", SettingKind::Channel, "int", {}, "50", "Output channels: MXL grain read timeout.", false},
+                {"READER_TIMEOUT_MS", SettingKind::Channel, "int", {}, "50", "Output channels: longest wait for a grain or audio block; never past the frames the card still holds (preroll - 1).", false},
                 {"LABEL", SettingKind::Channel, "string", {}, "", "Channel label for logs/metrics (defaults to ch<x>).", false},
             };
         }

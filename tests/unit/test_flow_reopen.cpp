@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 // An output channel re-opens its MXL readers when the writer re-creates a
-// flow under the same id (MXL_ERR_FLOW_INVALID), without a channel restart.
+// flow under the same id (MXL_ERR_FLOW_INVALID), without a channel restart;
+// reads video and audio from different domains; and rides out a source stall
+// by repeating the last frame and playing silence, without a preroll reset.
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -86,6 +88,19 @@ namespace
         std::vector<std::uint8_t> frames; // first byte of every scheduled frame
         std::uint64_t audioBlocks = 0;
         std::uint64_t audioBlocksWithSound = 0;
+        std::uint64_t late = 0; // completions reported DisplayedLate
+
+        std::uint64_t lateFrames()
+        {
+            std::lock_guard const lock{mutex};
+            return late;
+        }
+
+        std::uint64_t blocks()
+        {
+            std::lock_guard const lock{mutex};
+            return audioBlocks;
+        }
 
         std::size_t frameCount()
         {
@@ -111,8 +126,10 @@ namespace
         }
     };
 
-    /// Completes one scheduled frame per frame period, like a DeckLink output
-    /// that is never late, and pulls audio after each completion.
+    /// Completes one scheduled frame per frame period and pulls audio after
+    /// each completion. Like a DeckLink output, frame n (ids from 1) is shown
+    /// n - 1 periods after the start: a frame scheduled after that (the
+    /// callbacks held it up) completes DisplayedLate.
     class FakePlayback final : public dl::IPlaybackSession
     {
     public:
@@ -137,7 +154,12 @@ namespace
             std::lock_guard const lock{_played->mutex};
             _played->frames.push_back(size > 0 ? bytes[0] : 0);
             auto const id = _nextId++;
-            _queue.push_back(id);
+            bool late = false;
+            if (_running)
+            {
+                late = std::chrono::steady_clock::now() > _start + _period * static_cast<std::int64_t>(id - 1);
+            }
+            _queue.emplace_back(id, late);
             return id;
         }
 
@@ -168,26 +190,37 @@ namespace
 
         std::optional<std::string> startPlayback(std::int64_t, std::int64_t) override
         {
-            _running = true;
             auto const period = std::chrono::nanoseconds(1'000'000'000LL * _params.mode.rateDenominator / _params.mode.rateNumerator);
+            {
+                std::lock_guard const lock{_played->mutex};
+                _period = period;
+                _start = std::chrono::steady_clock::now();
+                _running = true;
+            }
             _ticker = std::thread([this, period] {
-                auto next = std::chrono::steady_clock::now() + period;
+                auto next = _start + period;
                 while (_running)
                 {
                     std::this_thread::sleep_until(next);
                     next += period;
                     std::optional<std::uint64_t> id;
+                    auto result = dl::CompletionResult::Completed;
                     {
                         std::lock_guard const lock{_played->mutex};
                         if (!_queue.empty())
                         {
-                            id = _queue.front();
+                            id = _queue.front().first;
+                            if (_queue.front().second)
+                            {
+                                result = dl::CompletionResult::DisplayedLate;
+                                ++_played->late;
+                            }
                             _queue.pop_front();
                         }
                     }
                     if (id && _running)
                     {
-                        _callbacks.onFrameCompleted(*id, dl::CompletionResult::Completed);
+                        _callbacks.onFrameCompleted(*id, result);
                         if (_params.audioEnable)
                         {
                             _callbacks.onRenderAudio(false);
@@ -229,7 +262,9 @@ namespace
         std::shared_ptr<Played> _played;
         Params _params;
         dl::PlaybackCallbacks _callbacks;
-        std::deque<std::uint64_t> _queue;
+        std::deque<std::pair<std::uint64_t, bool>> _queue; // id, scheduled late
+        std::chrono::steady_clock::time_point _start;
+        std::chrono::nanoseconds _period{0};
         std::uint64_t _nextId = 1;
         std::atomic<bool> _running{false};
         std::thread _ticker;
@@ -309,6 +344,10 @@ namespace
             : _writer(domain, p, 1)
             , _frame(_writer.grainPayloadSize() > 0 ? _writer.grainPayloadSize() : 1, fill)
             , _pump([this] {
+                if (paused)
+                {
+                    return; // the flow stays, no new grains: a source stall
+                }
                 auto const rate = _writer.grainRate();
                 auto const index = ::mxlGetCurrentIndex(&rate);
                 if (index != _last)
@@ -318,6 +357,8 @@ namespace
                 }
             })
         {}
+
+        std::atomic<bool> paused{false};
 
     private:
         mxlbridge::VideoWriter _writer;
@@ -334,6 +375,11 @@ namespace
             : _writer(domain, p, 1)
             , _value(value)
             , _pump([this] {
+                if (paused)
+                {
+                    _last = 0; // resumes at the current time, like a restarted origin
+                    return;
+                }
                 auto const rate = _writer.sampleRate();
                 auto const now = ::mxlGetCurrentIndex(&rate);
                 if (_last == 0)
@@ -350,6 +396,8 @@ namespace
                 }
             })
         {}
+
+        std::atomic<bool> paused{false};
 
     private:
         mxlbridge::AudioWriter _writer;
@@ -371,8 +419,16 @@ namespace
         mxlbridge::VideoFlowParams video;
         mxlbridge::AudioFlowParams audio;
 
+        /// tmpfs when there is one (as in production): a domain on a disk
+        /// can stall a read for writeback and make the timing checks flaky.
+        static fs::path root()
+        {
+            std::error_code ec;
+            return fs::is_directory("/dev/shm", ec) ? fs::path("/dev/shm") : fs::temp_directory_path();
+        }
+
         explicit Rig(char const* name)
-            : path(fs::temp_directory_path() / (std::string("mxldl-reopen-") + name + "-" + std::to_string(::getpid())))
+            : path(root() / (std::string("mxldl-reopen-") + name + "-" + std::to_string(::getpid())))
         {
             fs::remove_all(path);
             domain = std::make_unique<mxlbridge::Domain>(path.string());
@@ -428,6 +484,16 @@ namespace
         double reconnects()
         {
             return metrics.counter("mxl_decklink_reconnect_total", "", labels()).value();
+        }
+
+        double counter(char const* name, char const* label = nullptr, char const* value = nullptr)
+        {
+            auto l = labels();
+            if (label != nullptr)
+            {
+                l.emplace_back(label, value);
+            }
+            return metrics.counter(name, "", l).value();
         }
 
         ops::Labels labels() const
@@ -518,6 +584,131 @@ TEST_CASE("output channel re-opens a re-created audio flow of its sync group")
     CHECK(rig.reopens() == 1.0);
     CHECK(rig.reconnects() == 0.0);
     CHECK(out.status().state.load() == channel::State::Healthy);
+
+    out.stop();
+    audio.reset();
+    video.reset();
+}
+
+TEST_CASE("output channel reads video and audio from different domains and re-opens both")
+{
+    // Platform productions route the video and the audio of one output from
+    // different functions, so from different MXL domains. 1.0.4 opened all
+    // readers of an output on one instance of one domain: the audio flow was
+    // not found (status 2) and every bring-up failed.
+    Rig rig("mixed");
+    rig.withAudio();
+    auto const pathA = rig.path.string() + "-video-domain";
+    auto const pathB = rig.path.string() + "-audio-domain";
+    fs::remove_all(pathA);
+    fs::remove_all(pathB);
+    auto domainA = std::make_unique<mxlbridge::Domain>(pathA);
+    auto domainB = std::make_unique<mxlbridge::Domain>(pathB);
+    rig.ch.readerDomainPath = pathA;
+    rig.ch.audioFlows[0].readerDomainPath = pathB;
+
+    auto video = std::make_unique<VideoSource>(*domainA, rig.video, kGen1);
+    auto audio = std::make_unique<AudioSource>(*domainB, rig.audio, 0x10000000);
+    std::this_thread::sleep_for(200ms);
+
+    {
+        channel::OutputChannel out(rig.global, rig.ch, *rig.sub, *rig.domain, rig.metrics, "test");
+        out.start();
+        REQUIRE(waitUntil([&] { return out.status().state.load() == channel::State::Healthy; }, 3s));
+        REQUIRE(waitUntil([&] { return rig.played->countSince(0, kGen1) >= 10 && rig.played->soundBlocks() >= 10; }, 2s));
+        CHECK(rig.reconnects() == 0.0);
+
+        // Both writers restart (their flows are re-created in their own domains).
+        video.reset();
+        audio.reset();
+        auto const before = rig.played->frameCount();
+        video = std::make_unique<VideoSource>(*domainA, rig.video, kGen2);
+        audio = std::make_unique<AudioSource>(*domainB, rig.audio, 0x10000000);
+        CHECK(waitUntil([&] { return rig.reopens() == 2.0; }, 3s));
+        CHECK(waitUntil([&] { return rig.played->countSince(before, kGen2) >= 10; }, 3s));
+        auto const sound = rig.played->soundBlocks();
+        CHECK(waitUntil([&] { return rig.played->soundBlocks() >= sound + 10; }, 2s));
+        CHECK(waitUntil([&] { return out.status().state.load() == channel::State::Healthy; }, 2s));
+        CHECK(rig.reconnects() == 0.0);
+        CHECK(out.status().reconnects.load() == 0);
+        out.stop();
+    }
+
+    // The output never created a directory for a domain it only reads.
+    auto const pathC = rig.path.string() + "-not-there";
+    rig.ch.readerDomainPath = pathC;
+    {
+        channel::OutputChannel out(rig.global, rig.ch, *rig.sub, *rig.domain, rig.metrics, "test");
+        out.start();
+        std::this_thread::sleep_for(300ms);
+        CHECK(out.status().state.load() != channel::State::Healthy);
+        out.stop();
+    }
+    CHECK_FALSE(fs::exists(pathC));
+
+    video.reset();
+    audio.reset();
+    domainA.reset();
+    domainB.reset();
+    std::error_code ec;
+    fs::remove_all(pathA, ec);
+    fs::remove_all(pathB, ec);
+}
+
+TEST_CASE("a source stall repeats the last frame and plays silence without a preroll reset")
+{
+    // A fabrics mirror whose origin restarts: the flow stays, no new grains
+    // for a few seconds. 1.0.4 waited CHx_READER_TIMEOUT_MS in every DeckLink
+    // callback (sync group, grain, audio), the card ran out of frames and
+    // reported them late, and 25 late frames in 10 s reset the channel.
+    Rig rig("stall");
+    rig.withAudio();
+    auto video = std::make_unique<VideoSource>(*rig.domain, rig.video, kGen1);
+    auto audio = std::make_unique<AudioSource>(*rig.domain, rig.audio, 0x10000000);
+    std::this_thread::sleep_for(200ms);
+
+    channel::OutputChannel out(rig.global, rig.ch, *rig.sub, *rig.domain, rig.metrics, "test");
+    out.start();
+    REQUIRE(waitUntil([&] { return out.status().state.load() == channel::State::Healthy; }, 3s));
+    REQUIRE(waitUntil([&] { return rig.played->soundBlocks() >= 10; }, 2s));
+
+    video->paused = true;
+    audio->paused = true;
+    auto const frames = rig.played->frameCount();
+    auto const blocks = rig.played->blocks();
+    std::this_thread::sleep_for(1500ms);
+    CHECK(out.status().state.load() == channel::State::Degraded);
+    auto const soundAtStall = rig.played->soundBlocks();
+    std::this_thread::sleep_for(1000ms);
+
+    // 2.5 s at 50 Hz: about 125 frames and audio blocks, all on time.
+    CHECK(rig.played->frameCount() - frames >= 100);
+    CHECK(rig.played->blocks() - blocks >= 100);
+    CHECK(rig.played->soundBlocks() == soundAtStall); // silence
+    CHECK(rig.played->countSince(frames, kGen1) == rig.played->frameCount() - frames); // the last frame
+    CHECK(rig.counter("mxl_decklink_frames_repeated_total", "reason", "source_stall") >= 100.0);
+    CHECK(rig.counter("mxl_decklink_source_stalls_total", "essence", "video") == 1.0);
+    CHECK(rig.counter("mxl_decklink_source_stalls_total", "essence", "audio") == 1.0);
+
+    auto const grains = out.status().grainsCommitted.load();
+    auto const sound = rig.played->soundBlocks();
+    video->paused = false;
+    audio->paused = false;
+    CHECK(waitUntil([&] { return out.status().grainsCommitted.load() >= grains + 10; }, 2s));
+    CHECK(waitUntil([&] { return rig.played->soundBlocks() >= sound + 10; }, 2s));
+    CHECK(waitUntil([&] { return out.status().state.load() == channel::State::Healthy; }, 1s));
+
+    // No output-side trouble: nothing late (a busy test host may delay a
+    // frame or two) or dropped, no preroll reset, and the stall is not a
+    // re-created flow.
+    CHECK(rig.played->lateFrames() <= 2);
+    CHECK(rig.counter("mxl_decklink_frames_late_total") == static_cast<double>(rig.played->lateFrames()));
+    CHECK(rig.counter("mxl_decklink_frames_dropped_total") == 0.0);
+    CHECK(out.status().framesDropped.load() == 0);
+    CHECK(out.status().framesRepeated.load() >= 100);
+    CHECK(rig.reconnects() == 0.0);
+    CHECK(out.status().reconnects.load() == 0);
+    CHECK(rig.reopens() == 0.0);
 
     out.stop();
     audio.reset();
