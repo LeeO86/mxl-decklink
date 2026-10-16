@@ -16,7 +16,7 @@ namespace mxldl::util
         std::uint8_t did = 0;
         std::uint8_t sdid = 0;
         std::uint32_t lineNumber = 0;
-        std::uint8_t dataStreamIndex = 0;
+        std::uint8_t dataStreamIndex = 0; // SDK data stream: 0 luma (Y; SD), 1 chroma (C) → RFC 8331 C bit
         std::vector<std::uint8_t> userData; // UDW payload, 8-bit values
     };
 

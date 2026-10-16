@@ -164,11 +164,16 @@ namespace mxldl::util
         for (auto const* p : selected)
         {
             std::size_t const origin = w.bitPos();
-            w.put(p->lineNumber != 0 ? 1U : 0U, 1); // C: 1 when line/offset meaningful
+            // C: 1 = colour-difference (chroma) data stream. The SDK's data stream
+            // index is 0 for luma (Y, and the only stream in SD) and 1 for chroma
+            // (HD, when the luma stream is full); anything else counts as luma.
+            w.put(p->dataStreamIndex == 1 ? 1U : 0U, 1);
             w.put(p->lineNumber & 0x7ffU, 11);
             w.put(0, 12); // horizontal offset: unknown from the SDK
-            w.put(p->dataStreamIndex != 0 ? 1U : 0U, 1); // S
-            w.put(p->dataStreamIndex & 0x7fU, 7);
+            // S = 0, StreamNum = 0: no multi-stream link number (ST 425-3 etc.) is known;
+            // the Y/C stream is carried by C, not by StreamNum.
+            w.put(0, 1);
+            w.put(0, 7);
 
             std::uint16_t const did10 = addParity(p->did);
             std::uint16_t const sdid10 = addParity(p->sdid);
@@ -219,11 +224,11 @@ namespace mxldl::util
         {
             std::size_t const origin = r.bitPos();
             AncPacket p;
-            r.get(1); // C
+            p.dataStreamIndex = r.get(1) != 0 ? 1 : 0; // C: chroma stream = index 1
             p.lineNumber = r.get(11);
             r.get(12); // horizontal offset
             r.get(1); // S
-            p.dataStreamIndex = static_cast<std::uint8_t>(r.get(7));
+            r.get(7); // StreamNum
             p.did = static_cast<std::uint8_t>(r.get(10) & 0xff);
             p.sdid = static_cast<std::uint8_t>(r.get(10) & 0xff);
             std::uint32_t const dc = r.get(10) & 0xff;

@@ -144,33 +144,52 @@ TEST_CASE("grain bytes are the RFC 8331 payload from the Length field on, as MXL
 {
     // Reference vector: mxl-st2110-gateway codec::serialiseGrain (the gateway's ANC ingest and
     // egress codec, which follows MXL docs/Architecture.md and mxl-data-probe) for the same two
-    // packets, field 1: the gateway's AFD golden packet (with C = 1, as a known line sets it here)
-    // and a packet with stream number 2. Length(16) ANC_Count(8) F(2) reserved(22), then the
-    // first packet at byte 6 and the second at byte 26 (each a multiple of 32 bits).
-    std::vector<std::uint8_t> const reference = {0x00, 0x24, 0x02, 0x80, 0x00, 0x00, 0x80, 0xB0, 0x00, 0x00, 0x90, 0x60, 0x54, 0x21,
-        0x08, 0x80, 0x20, 0x08, 0x02, 0x00, 0x80, 0x20, 0x08, 0x02, 0x56, 0x00, 0x80, 0x90, 0x00, 0x82, 0x58, 0x50, 0x18, 0x0E, 0xAA,
+    // packets, field 1: the gateway's AFD golden packet (luma, C = 0; bytes 6-10 are the ones its
+    // golden test checks) and a packet from the chroma data stream (C = 1). Length(16)
+    // ANC_Count(8) F(2) reserved(22), then the first packet at byte 6 and the second at byte 26
+    // (each a multiple of 32 bits). S and StreamNum are 0.
+    std::vector<std::uint8_t> const reference = {0x00, 0x24, 0x02, 0x80, 0x00, 0x00, 0x00, 0xB0, 0x00, 0x00, 0x90, 0x60, 0x54, 0x21,
+        0x08, 0x80, 0x20, 0x08, 0x02, 0x00, 0x80, 0x20, 0x08, 0x02, 0x56, 0x00, 0x80, 0x90, 0x00, 0x00, 0x58, 0x50, 0x18, 0x0E, 0xAA,
         0x95, 0x50, 0x19, 0x94, 0x00, 0x00, 0x00};
     AncPacket afd;
     afd.did = 0x41;
     afd.sdid = 0x05;
     afd.lineNumber = 11;
     afd.userData = {0x08, 0, 0, 0, 0, 0, 0, 0};
-    AncPacket other;
-    other.did = 0x61;
-    other.sdid = 0x01;
-    other.lineNumber = 9;
-    other.dataStreamIndex = 2;
-    other.userData = {0xaa, 0x55, 0x01};
+    AncPacket chroma;
+    chroma.did = 0x61;
+    chroma.sdid = 0x01;
+    chroma.lineNumber = 9;
+    chroma.dataStreamIndex = 1;
+    chroma.userData = {0xaa, 0x55, 0x01};
 
-    auto const encoded = encodeRfc8331({afd, other}, 4096, kAncField1);
+    auto const encoded = encodeRfc8331({afd, chroma}, 4096, kAncField1);
     CHECK(encoded.packetsEncoded == 2);
     CHECK(encoded.payload == reference);
 
     auto const decoded = decodeRfc8331(reference.data(), reference.size());
     REQUIRE(decoded.size() == 2);
     CHECK(decoded[0].lineNumber == 11);
+    CHECK(decoded[0].dataStreamIndex == 0);
     CHECK(decoded[0].userData == afd.userData);
     CHECK(decoded[1].lineNumber == 9);
-    CHECK(decoded[1].dataStreamIndex == 2);
-    CHECK(decoded[1].userData == other.userData);
+    CHECK(decoded[1].dataStreamIndex == 1);
+    CHECK(decoded[1].userData == chroma.userData);
+}
+
+TEST_CASE("C bit follows the SDK data stream: 0 luma (and SD, and unknown), 1 chroma")
+{
+    AncPacket p;
+    p.did = 0x61;
+    p.sdid = 0x02;
+    p.lineNumber = 9;
+    p.userData = {0x01};
+    auto cBit = [&](std::uint8_t index) {
+        p.dataStreamIndex = index;
+        auto const e = encodeRfc8331({p}, 4096);
+        return (e.payload[6] >> 7) & 1U; // first bit of the first packet
+    };
+    CHECK(cBit(0) == 0); // line 9 is known: C stays 0 (it was 1 before 1.0.7)
+    CHECK(cBit(1) == 1);
+    CHECK(cBit(5) == 0); // not a DeckLink stream index: luma
 }
