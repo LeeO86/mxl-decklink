@@ -16,16 +16,16 @@ namespace mxldl::util
         std::uint8_t did = 0;
         std::uint8_t sdid = 0;
         std::uint32_t lineNumber = 0;
-        std::uint8_t dataStreamIndex = 0;
+        std::uint8_t dataStreamIndex = 0; // SDK data stream: 0 luma (Y; SD), 1 chroma (C) → RFC 8331 C bit
         std::vector<std::uint8_t> userData; // UDW payload, 8-bit values
     };
 
     /// Serializes packets into the RFC 8331 §2 payload from the Length field
-    /// onward (the container stores no RTP header):
-    ///   Length(16) | ANC_Count(8) | F(2) | reserved(22) |   (F = `field`)
-    ///   per packet: C(1) LineNumber(11) HorizOffset(12) S(1) StreamNum(7)
+    /// onward, as MXL stores it (no RTP header, no extended sequence number):
+    ///   Length(16) | ANC_Count(8) | F(2) | reserved(22) |   (F = `field`; 6 bytes)
+    ///   per packet, from byte 6 on: C(1) LineNumber(11) HorizOffset(12) S(1) StreamNum(7)
     ///               DID(10) SDID(10) DataCount(10) UDW(10 × n) Checksum(10)
-    ///               word-aligned padding
+    ///               word_align (zero bits to a multiple of 32 bits per packet)
     /// DID/SDID/DC/UDW 10-bit words carry the SMPTE 291 parity bits (b8 =
     /// even parity of b0..7, b9 = !b8).
     /// \param maxBytes grain capacity; packets that would overflow are dropped

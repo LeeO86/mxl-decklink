@@ -73,7 +73,7 @@ Then the MXL sequence runs: `mxlFlowWriterOpenGrain(inst, writer, grainIndex, &g
 
 In parallel, `audioPacket->GetBytes(&pcm)` is read. Because DeckLink delivers interleaved PCM (`bmdAudioSampleType32bitInteger`, 48 kHz) and MXL expects `audio/float32` deinterleaved per channel in a `channels` blob, the bridge converts in flight: for each sample, `float32 = int32 / 2147483648.0f`, deinterleaving into an `mxlMutableWrappedMultiBufferSlice`. The slice structure addresses ring-buffer wraparound via two fragments. `mxlFlowWriterOpenSamples` / `CommitSamples` open and finalize the batch.
 
-For ANC data, `IDeckLinkVideoFrameAncillaryPackets` is iterated and written into a `video/smpte291` flow per RFC 8331 §2 (from the length field onward) when the channel has ANC enabled (one grain per field for interlaced modes, §3.2.2). The callback must complete well under the frame interval (at 1080p50: <20 ms) — therefore no blocking operations inside it.
+For ANC data, `IDeckLinkVideoFrameAncillaryPackets` is iterated and written into a `video/smpte291` flow per RFC 8331 §2 (from the length field onward, as MXL docs/Architecture.md stores it: Length at byte 0, ANC_Count, F, reserved, the first packet at byte 6, each packet a multiple of 32 bits; the C bit is 1 only for the SDK's chroma data stream, index 1, and S and StreamNum are 0) when the channel has ANC enabled (one grain per field for interlaced modes, §3.2.2). The callback must complete well under the frame interval (at 1080p50: <20 ms) — therefore no blocking operations inside it.
 
 ### 2.4 Data Flow, Output Path (MXL → DeckLink)
 
