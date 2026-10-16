@@ -40,7 +40,7 @@ namespace mxldl::util
         {
             case 1080: return line >= 564;
             case 576: return line >= 313;
-            case 486: return line >= 266 || line <= 3;
+            case 486: return line >= 266 || (line >= 1 && line <= 3); // 0 = line unknown: field 1
             default: return false;
         }
     }

@@ -2,7 +2,10 @@
 // Interlaced video in MXL (util/interlace.hpp): field split and weave, the
 // index and rate math, and an interlaced flow written field by field and read
 // back as woven frames.
+#include <atomic>
+#include <chrono>
 #include <cstring>
+#include <thread>
 #include <filesystem>
 #include <vector>
 
@@ -12,11 +15,15 @@
 #include <mxl/flow.h>
 #include <mxl/time.h>
 
+#include "channel/input_channel.hpp"
 #include "config/videomodes.hpp"
+#include "decklink/device.hpp"
 #include "mxlbridge/domain.hpp"
 #include "mxlbridge/flowdef.hpp"
 #include "mxlbridge/videoreader.hpp"
 #include "mxlbridge/videowriter.hpp"
+#include "ops/metrics.hpp"
+#include "util/anc.hpp"
 #include "util/interlace.hpp"
 #include "util/v210.hpp"
 
@@ -155,6 +162,8 @@ TEST_CASE("ANC packets by field: SMPTE line numbers of the second field")
     CHECK_FALSE(util::ancLineInSecondField(486, 21));
     CHECK(util::ancLineInSecondField(486, 284));
     CHECK(util::ancLineInSecondField(486, 2));
+    CHECK_FALSE(util::ancLineInSecondField(486, 0)); // line unknown: field 1
+    CHECK_FALSE(util::ancLineInSecondField(1080, 0));
     // Progressive heights: no second field.
     CHECK_FALSE(util::ancLineInSecondField(720, 600));
 }
@@ -244,7 +253,222 @@ TEST_CASE("an interlaced flow written field by field reads back as woven frames 
             REQUIRE(writer.writeField(2 * k + 2, frame.data(), lineBytes, mode.height, first) == MXL_STATUS_OK);
             CHECK(reader.headIndex() == k);
             CHECK(reader.getGrain(k + 1, 0, grain) == MXL_ERR_OUT_OF_RANGE_TOO_EARLY);
+
+            // A frame whose first field is invalid is invalid at once, without
+            // waiting for its second field (not written here).
+            REQUIRE(writer.writeInvalid(2 * k + 4) == MXL_STATUS_OK);
+            auto const t0 = std::chrono::steady_clock::now();
+            REQUIRE(reader.getGrain(k + 2, 500'000'000ULL, grain) == MXL_STATUS_OK);
+            CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(100));
+            CHECK(grain.payload == nullptr);
+            CHECK((grain.info.flags & MXL_GRAIN_FLAG_INVALID) != 0);
         }
+    }
+    std::error_code ec;
+    fs::remove_all(path, ec);
+}
+
+namespace
+{
+    /// A capture card that delivers one PAL frame at every TAI frame edge
+    /// (when the frame is complete, as a card does), with an ANC packet in
+    /// each field: line 9 (field 1) and line 322 (field 2).
+    class FakeCapture final : public dl::ICaptureSession
+    {
+    public:
+        explicit FakeCapture(std::vector<std::uint8_t> const& frame)
+            : _frame(frame)
+        {}
+
+        ~FakeCapture() override
+        {
+            stop();
+        }
+
+        std::optional<std::string> enable(Params const& params, dl::CaptureCallbacks callbacks) override
+        {
+            _params = params;
+            _callbacks = std::move(callbacks);
+            return std::nullopt;
+        }
+
+        std::optional<std::string> start() override
+        {
+            _running = true;
+            _thread = std::thread([this] {
+                mxlRational const rate{_params.mode.rateNumerator, _params.mode.rateDenominator};
+                auto next = ::mxlGetCurrentIndex(&rate) + 1;
+                while (_running)
+                {
+                    auto const edge = ::mxlIndexToTimestamp(&rate, next);
+                    std::this_thread::sleep_for(std::chrono::nanoseconds(::mxlGetNsUntilIndex(next, &rate)));
+                    ++next;
+                    dl::VideoFrameView v;
+                    v.bytes = _frame.data();
+                    v.width = _params.mode.width;
+                    v.height = _params.mode.height;
+                    v.rowBytes = util::v210RowBytes(v.width);
+                    v.hasHardwareTimestamp = true;
+                    v.hardwareTimestampNs = edge; // the hardware clock is TAI here
+                    for (std::uint32_t const line : {9U, 322U})
+                    {
+                        util::AncPacket p;
+                        p.did = 0x61;
+                        p.sdid = 0x02;
+                        p.lineNumber = line;
+                        p.userData = {0x01, 0x02};
+                        v.ancPackets.push_back(p);
+                    }
+                    _callbacks.onFrame(v, nullptr);
+                }
+            });
+            return std::nullopt;
+        }
+
+        void stop() override
+        {
+            _running = false;
+            if (_thread.joinable())
+            {
+                _thread.join();
+            }
+        }
+
+        void resetStreams() override {}
+        std::optional<std::string> changeMode(config::VideoMode const&) override
+        {
+            return std::nullopt;
+        }
+        void disable() override
+        {
+            stop();
+        }
+        bool signalLocked() override
+        {
+            return true;
+        }
+        std::optional<std::uint64_t> hardwareClockNowNs() override
+        {
+            return ::mxlGetTime();
+        }
+
+    private:
+        std::vector<std::uint8_t> const& _frame;
+        Params _params;
+        dl::CaptureCallbacks _callbacks;
+        std::atomic<bool> _running{false};
+        std::thread _thread;
+    };
+
+    class FakeCaptureDevice final : public dl::ISubDevice
+    {
+    public:
+        explicit FakeCaptureDevice(std::vector<std::uint8_t> const& frame)
+            : _frame(frame)
+        {}
+        [[nodiscard]] dl::SubDeviceInfo const& info() const override
+        {
+            return _info;
+        }
+        bool supportsMode(config::VideoMode const&, config::Direction) override
+        {
+            return true;
+        }
+        dl::SubDeviceStatus status() override
+        {
+            return {};
+        }
+        std::unique_ptr<dl::ICaptureSession> openCapture() override
+        {
+            return std::make_unique<FakeCapture>(_frame);
+        }
+        std::unique_ptr<dl::IPlaybackSession> openPlayback() override
+        {
+            return nullptr;
+        }
+
+    private:
+        std::vector<std::uint8_t> const& _frame;
+        dl::SubDeviceInfo _info;
+    };
+}
+
+TEST_CASE("input channel, interlaced capture: two field grains per frame at 2k, 2k + 1, ANC per field at the field rate")
+{
+    auto const path = fs::temp_directory_path() / ("mxldl-interlace-in-" + std::to_string(::getpid()));
+    fs::remove_all(path);
+    {
+        mxlbridge::Domain domain(path.string());
+        auto const mode = *config::lookupVideoMode("PAL");
+        std::size_t const lineBytes = util::v210RowBytes(mode.width);
+        auto const frame = makeFrame(lineBytes, mode.height);
+        FakeCaptureDevice device(frame);
+
+        config::Config global;
+        config::ChannelConfig ch;
+        ch.index = 0;
+        ch.label = "in";
+        ch.groupHint = "interlace-in";
+        ch.direction = config::Direction::Input;
+        ch.videoModeName = mode.name;
+        ch.videoMode = mode;
+        ch.videoFlowId = *util::parseUuid("7a0c2e11-1c1d-4a55-9a6e-0b1c2d3e4f11");
+        ch.audioEnable = false;
+        ch.ancEnable = true;
+        ch.ancFlowId = *util::parseUuid("7a0c2e11-1c1d-4a55-9a6e-0b1c2d3e4f12");
+        ops::Registry metrics;
+        channel::InputChannel in(global, ch, device, domain, metrics, "test");
+        in.start();
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+
+        // Checked while the channel runs (its writers own the flows).
+        mxlbridge::VideoReader video(domain, ch.videoFlowId.toString());
+        REQUIRE(video.interlaced());
+        // The newest complete frame k: delivered at the end of the frame, so
+        // its first field is grain 2k of the frame's start.
+        mxlRational const frameRate{mode.rateNumerator, mode.rateDenominator};
+        auto const k = video.headIndex();
+        CHECK(::mxlGetCurrentIndex(&frameRate) - k <= 3);
+        for (std::uint64_t i = 0; i < 2; ++i)
+        {
+            mxlGrainInfo info{};
+            std::uint8_t* payload = nullptr;
+            REQUIRE(::mxlFlowReaderGetGrain(video.handle(), 2 * k + i, 0, &info, &payload) == MXL_STATUS_OK);
+            CHECK((info.flags & MXL_GRAIN_FLAG_INVALID) == 0);
+            CHECK(info.grainSize == lineBytes * mode.height / 2);
+            std::size_t wrong = 0;
+            for (std::uint32_t r = 0; r < mode.height / 2; ++r)
+            {
+                wrong += rowEquals(payload + r * lineBytes, frame.data() + (2 * r + i) * lineBytes, lineBytes) ? 0 : 1;
+            }
+            CHECK(wrong == 0); // tff: 2k = even lines, 2k + 1 = odd lines
+        }
+
+        // ANC: declared at the field rate, field 1's packet at 2k (F = 10),
+        // field 2's at 2k + 1 (F = 11).
+        mxlFlowReader anc = nullptr;
+        REQUIRE(::mxlCreateFlowReader(domain.instance(), ch.ancFlowId->toString().c_str(), nullptr, &anc) == MXL_STATUS_OK);
+        mxlFlowConfigInfo aci{};
+        REQUIRE(::mxlFlowReaderGetConfigInfo(anc, &aci) == MXL_STATUS_OK);
+        CHECK(aci.common.grainRate.numerator == 50);
+        CHECK(aci.common.grainRate.denominator == 1);
+        for (std::uint64_t i = 0; i < 2; ++i)
+        {
+            mxlGrainInfo info{};
+            std::uint8_t* payload = nullptr;
+            REQUIRE(::mxlFlowReaderGetGrain(anc, 2 * k + i, 0, &info, &payload) == MXL_STATUS_OK);
+            CHECK((payload[3] & 0xc0) == (i == 0 ? 0x80 : 0xc0));
+            auto const packets = util::decodeRfc8331(payload, info.grainSize);
+            REQUIRE(packets.size() == 1);
+            CHECK(packets[0].lineNumber == (i == 0 ? 9U : 322U));
+        }
+        ::mxlReleaseFlowReader(domain.instance(), anc);
+
+        in.stop();
+        auto const& st = in.status();
+        CHECK(st.framesTotal.load() >= 5);
+        CHECK(st.grainsCommitted.load() == 2 * st.framesTotal.load()); // two field grains per frame
+        CHECK(st.framesDropped.load() == 0);
     }
     std::error_code ec;
     fs::remove_all(path, ec);

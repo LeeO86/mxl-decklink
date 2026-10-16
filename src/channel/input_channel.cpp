@@ -586,12 +586,13 @@ namespace mxldl::channel
         }
 
         // ANC (§2.3): RFC 8331 grain aligned with the video grain index.
-        // Interlaced: each field's packets at its field's grain (a field
-        // without packets gets an empty grain).
+        // Interlaced: each field's packets at its field's grain, RFC 8331 F
+        // = field 1 / field 2 (when only one field has packets, the other
+        // gets an empty grain; a frame without packets writes none).
         if (_cfg.ancEnable && _ancWriter && !video.ancPackets.empty())
         {
-            auto writeAnc = [this](std::uint64_t index, std::vector<util::AncPacket> const& packets) {
-                auto const ancStatus = _ancWriter->writePackets(index, packets);
+            auto writeAnc = [this](std::uint64_t index, std::vector<util::AncPacket> const& packets, std::uint8_t field) {
+                auto const ancStatus = _ancWriter->writePackets(index, packets, field);
                 if (ancStatus != MXL_STATUS_OK)
                 {
                     log::debug("anc_write_failed", {{"channel_index", _cfg.index}, {"status", static_cast<int>(ancStatus)}});
@@ -604,12 +605,12 @@ namespace mxldl::channel
                 {
                     perField[util::ancLineInSecondField(_currentMode.height, p.lineNumber) ? 1 : 0].push_back(p);
                 }
-                writeAnc(grainIndex, perField[0]);
-                writeAnc(grainIndex + 1, perField[1]);
+                writeAnc(grainIndex, perField[0], util::kAncField1);
+                writeAnc(grainIndex + 1, perField[1], util::kAncField2);
             }
             else
             {
-                writeAnc(grainIndex, video.ancPackets);
+                writeAnc(grainIndex, video.ancPackets, util::kAncFieldProgressive);
             }
         }
 

@@ -116,3 +116,26 @@ TEST_CASE("checksum word follows ST 291-1 (9-bit sum, b9 = !b8)")
     CHECK((cs10 & 0x1ff) == expected9);
     CHECK(((cs10 >> 9) & 1U) == (((cs10 >> 8) & 1U) ^ 1U));
 }
+
+TEST_CASE("RFC 8331 F bits: 00 progressive (default), 10 field 1, 11 field 2")
+{
+    AncPacket p;
+    p.did = 0x61;
+    p.sdid = 0x02;
+    p.lineNumber = 9;
+    p.userData = {0x01};
+    // F is the top two bits of byte 3 (after Length and ANC_Count).
+    CHECK((encodeRfc8331({p}, 4096).payload[3] & 0xc0) == 0x00);
+    CHECK((encodeRfc8331({p}, 4096, kAncFieldProgressive).payload[3] & 0xc0) == 0x00);
+    CHECK((encodeRfc8331({p}, 4096, kAncField1).payload[3] & 0xc0) == 0x80);
+    CHECK((encodeRfc8331({p}, 4096, kAncField2).payload[3] & 0xc0) == 0xc0);
+    CHECK((encodeRfc8331({}, 4096, kAncField2).payload[3] & 0xc0) == 0xc0);
+    // The rest of the header and the packets do not change.
+    auto const a = encodeRfc8331({p}, 4096);
+    auto b = encodeRfc8331({p}, 4096, kAncField2);
+    b.payload[3] &= 0x3f;
+    CHECK(a.payload == b.payload);
+    auto const decoded = decodeRfc8331(b.payload.data(), b.payload.size());
+    REQUIRE(decoded.size() == 1);
+    CHECK(decoded[0].lineNumber == 9);
+}

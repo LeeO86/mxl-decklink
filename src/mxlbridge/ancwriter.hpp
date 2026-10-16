@@ -27,8 +27,9 @@ namespace mxldl::mxlbridge
 
         /// Serializes the frame's ANC packets per RFC 8331 §2 and commits the
         /// grain. Empty packet lists commit an empty (but valid) grain so the
-        /// data flow stays continuous with video.
-        mxlStatus writePackets(std::uint64_t grainIndex, std::vector<util::AncPacket> const& packets);
+        /// data flow stays continuous with video. `field`: the RFC 8331 F
+        /// value (util::kAncField1 / kAncField2 for an interlaced field).
+        mxlStatus writePackets(std::uint64_t grainIndex, std::vector<util::AncPacket> const& packets, std::uint8_t field = util::kAncFieldProgressive);
 
         [[nodiscard]] mxlRational grainRate() const
         {

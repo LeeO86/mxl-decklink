@@ -52,6 +52,7 @@ namespace mxldl::util
     /// Packet::GetLineNumber reports it) of an interlaced mode with
     /// `frameHeight` active lines lies in the second field in time: 1080i
     /// (SMPTE ST 274) lines 564-1125, 625-line PAL (ITU-R BT.656) lines
-    /// 313-625, 525-line NTSC lines 266-525 and 1-3. Other heights: false.
+    /// 313-625, 525-line NTSC lines 266-525 and 1-3. Other heights, and
+    /// line 0 (unknown), are false (field 1).
     bool ancLineInSecondField(std::uint32_t frameHeight, std::uint32_t line);
 }

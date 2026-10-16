@@ -9,6 +9,7 @@
 #include <picojson/picojson.h>
 
 #include "util/interlace.hpp"
+#include "util/logging.hpp"
 
 namespace mxldl::mxlbridge
 {
@@ -39,6 +40,7 @@ namespace mxldl::mxlbridge
             status2 = ::mxlGetFlowDef(domain.instance(), _flowId.c_str(), def.data(), &size);
         }
         picojson::value root;
+        bool parsed = false;
         if (status2 == MXL_STATUS_OK && picojson::parse(root, std::string(def.data())).empty() && root.is<picojson::object>())
         {
             auto const& obj = root.get<picojson::object>();
@@ -50,7 +52,17 @@ namespace mxldl::mxlbridge
                 _interlaced = m == "interlaced_tff" || m == "interlaced_bff";
                 _bottomFieldFirst = m == "interlaced_bff";
                 _frameHeight = static_cast<std::uint32_t>(height->second.get<double>());
+                parsed = true;
             }
+        }
+        if (!parsed)
+        {
+            log::warn("mxl_flow_def_unreadable",
+                {
+                    {"flow_id", _flowId},
+                    {"status", static_cast<int>(status2)},
+                    {"details", "no interlace_mode/frame_height from the flow definition; the flow is read as progressive"},
+                });
         }
         if (_interlaced)
         {
@@ -91,14 +103,17 @@ namespace mxldl::mxlbridge
             {
                 return status;
             }
+            if (payload == nullptr || (field[i].info.flags & MXL_GRAIN_FLAG_INVALID) != 0)
+            {
+                // An invalid field makes the frame invalid: no need to
+                // wait for the other one.
+                out.info = field[i].info;
+                out.info.flags |= MXL_GRAIN_FLAG_INVALID;
+                out.payload = nullptr;
+                return MXL_STATUS_OK;
+            }
         }
         out.info = field[0].info;
-        if (field[0].payload == nullptr || field[1].payload == nullptr || ((field[0].info.flags | field[1].info.flags) & MXL_GRAIN_FLAG_INVALID) != 0)
-        {
-            out.info.flags |= MXL_GRAIN_FLAG_INVALID;
-            out.payload = nullptr;
-            return MXL_STATUS_OK;
-        }
         // Each field's v210 fill rows into the frame lines of its parity
         // (for v210a the key rows are left out: the output plays the fill).
         std::size_t const lineBytes = _configInfo.discrete.sliceSizes[0];

@@ -110,7 +110,7 @@ namespace mxldl::util
         return static_cast<std::uint16_t>((b9 << 9) | (b8 << 8) | value);
     }
 
-    AncEncodeResult encodeRfc8331(std::vector<AncPacket> const& packets, std::size_t maxBytes)
+    AncEncodeResult encodeRfc8331(std::vector<AncPacket> const& packets, std::size_t maxBytes, std::uint8_t field)
     {
         AncEncodeResult result;
         if (maxBytes < 8)
@@ -146,7 +146,7 @@ namespace mxldl::util
         // Length is back-patched once the data section size is known.
         w.put(0, 16);
         w.put(static_cast<std::uint32_t>(selected.size()), 8);
-        w.put(0, 2); // F: progressive / unspecified
+        w.put(field & 0x3U, 2); // F: 00 progressive / unspecified, 10 field 1, 11 field 2
         w.put(0, 22); // reserved
         w.alignTo32(); // header padded to 8 bytes so packets stay word-aligned
 
