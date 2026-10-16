@@ -8,6 +8,7 @@
 
 #include <mxl/time.h>
 
+#include "util/audioconv.hpp"
 #include "util/logging.hpp"
 #include "util/taiclock.hpp"
 #include "util/threading.hpp"
@@ -525,8 +526,10 @@ namespace mxldl::channel
             }
 
             auto const rate = _videoRate;
-            _samplesPerFrame = static_cast<std::size_t>(48000ULL * static_cast<std::uint64_t>(rate.denominator) /
-                                                        static_cast<std::uint64_t>(rate.numerator));
+            _maxSamplesPerFrame = util::maxAudioSamplesPerFrame(rate);
+            // Scratch for the largest block, so a callback never allocates.
+            _audioScratchInt32.reserve(_maxSamplesPerFrame * static_cast<std::size_t>(_cfg.audioChannelCount));
+            _audioScratchInt16.reserve(_maxSamplesPerFrame * static_cast<std::size_t>(_cfg.audioChannelCount));
 
             // §2.4 preroll: wait for data, then schedule
             // CHx_OUTPUT_PREROLL_GRAINS frames before starting playback.
@@ -617,7 +620,7 @@ namespace mxldl::channel
                 _recentWindowStart = util::taiNowNs();
                 if (!_audioFlows.empty())
                 {
-                    _nextAudioEndIndex = _nextGrainIndex * _samplesPerFrame;
+                    _audioEndFrame = _nextGrainIndex;
                 }
             }
 
@@ -650,7 +653,7 @@ namespace mxldl::channel
                         std::lock_guard const lock{_scheduleMutex};
                         if (!_audioFlows.empty())
                         {
-                            _nextAudioEndIndex = (_nextGrainIndex - 1) * _samplesPerFrame;
+                            _audioEndFrame = _nextGrainIndex - 1;
                         }
                     }
                     ++scheduled;
@@ -958,11 +961,11 @@ namespace mxldl::channel
         if (_nextGrainIndex != before && !_audioFlows.empty())
         {
             // The audio read position moves with the video's, so lip sync
-            // holds: audio block = (video grain - (preroll - 1)) x samples
-            // per frame. A slip plays one audio block again, a catch-up
+            // holds: audio block = the block of frame (video grain -
+            // (preroll - 1)). A slip plays one audio block again, a catch-up
             // skips as many blocks as grains.
             auto const delta = static_cast<std::int64_t>(_nextGrainIndex) - static_cast<std::int64_t>(before);
-            _nextAudioEndIndex = static_cast<std::uint64_t>(static_cast<std::int64_t>(_nextAudioEndIndex) + delta * static_cast<std::int64_t>(_samplesPerFrame));
+            _audioEndFrame = static_cast<std::uint64_t>(static_cast<std::int64_t>(_audioEndFrame) + delta);
         }
         if (status == MXL_STATUS_OK && grain.payload != nullptr && (grain.info.flags & MXL_GRAIN_FLAG_INVALID) == 0)
         {
@@ -1126,12 +1129,16 @@ namespace mxldl::channel
             return;
         }
         std::lock_guard const lock{_scheduleMutex};
-        _nextAudioEndIndex += _samplesPerFrame;
+        ++_audioEndFrame;
+        // The block of one frame on the TAI sample grid: 1920 samples at 25
+        // frames/s, 1602/1601 at 29.97.
+        auto const blockEnd = util::audioSampleIndexOfFrame(_videoRate, _audioEndFrame);
+        auto const blockSamples = static_cast<std::size_t>(blockEnd - util::audioSampleIndexOfFrame(_videoRate, _audioEndFrame - 1));
         auto const deckChannels = static_cast<std::size_t>(_cfg.audioChannelCount);
         // Same deadline as the last video read: this callback holds
         // _callbackMutex, so its wait delays the next video completion.
         auto const timeoutNs = readBudgetNs();
-        auto const sampleCount = _samplesPerFrame * deckChannels;
+        auto const sampleCount = blockSamples * deckChannels;
 
         void* pcm = nullptr;
         if (_cfg.audioSampleType == config::AudioSampleType::Int32)
@@ -1158,7 +1165,7 @@ namespace mxldl::channel
             // A stalled flow is read without waiting, so it cannot hold the
             // DeckLink callbacks (§2.4 source stall); its channels stay silent.
             noteHead(af.reader->headIndex(), steadyNowNs(), af.lastHead, af.headChangeNs);
-            auto const status = af.reader->readSamples(_nextAudioEndIndex, _samplesPerFrame, af.stalled ? 0 : timeoutNs, pcm, deckChannels,
+            auto const status = af.reader->readSamples(blockEnd, blockSamples, af.stalled ? 0 : timeoutNs, pcm, deckChannels,
                 af.cfg.deckLinkChannels, _cfg.audioSampleType);
             if (status == MXL_ERR_FLOW_INVALID)
             {
@@ -1210,20 +1217,20 @@ namespace mxldl::channel
             // stalled flows): the card's audio clock stays filled and the
             // sample index stays on the video's TAI grid, so audio is in sync
             // again when a stalled source resumes.
-            _playback->scheduleAudio(pcm, static_cast<std::uint32_t>(_samplesPerFrame));
+            _playback->scheduleAudio(pcm, static_cast<std::uint32_t>(blockSamples));
         }
         else
         {
             // A live source not there yet: skip this cycle and read the same
             // block next time.
-            _nextAudioEndIndex -= _samplesPerFrame;
+            --_audioEndFrame;
         }
         if (tooLate && !anyOk)
         {
             // Fell out of the ring: back to the video's read position (the
             // block played with the frame shown now, as at the start).
             auto const behind = static_cast<std::uint64_t>(_cfg.outputPrerollGrains > 1 ? _cfg.outputPrerollGrains - 1 : 0);
-            _nextAudioEndIndex = (_nextGrainIndex > behind ? _nextGrainIndex - behind : 0) * _samplesPerFrame;
+            _audioEndFrame = _nextGrainIndex > behind ? _nextGrainIndex - behind : 0;
         }
     }
 
@@ -1860,11 +1867,11 @@ namespace mxldl::channel
         }
         for (auto const& af : _audioFlows)
         {
-            if (af.reader && _samplesPerFrame > 0)
+            if (af.reader && _maxSamplesPerFrame > 0)
             {
                 auto const length = af.reader->bufferLength();
                 bufferLength = bufferLength == 0 ? length : std::min(bufferLength, length);
-                auto const frames = static_cast<std::int64_t>(length / 2 / _samplesPerFrame);
+                auto const frames = static_cast<std::int64_t>(length / 2 / _maxSamplesPerFrame);
                 cap = std::min<std::int64_t>(cap, frames - 1 - static_cast<std::int64_t>(preroll));
             }
         }

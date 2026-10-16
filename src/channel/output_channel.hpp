@@ -186,8 +186,13 @@ namespace mxldl::channel
         // Int16 uses a parallel buffer to avoid misaligned casts).
         std::vector<std::int32_t> _audioScratchInt32;
         std::vector<std::int16_t> _audioScratchInt16;
-        std::uint64_t _nextAudioEndIndex = 0;
-        std::size_t _samplesPerFrame = 0;
+        // Audio read position in frames: the block played last ends at the
+        // TAI start of frame _audioEndFrame (sample index
+        // util::audioSampleIndexOfFrame). Each audio callback plays the next
+        // frame's block, so the sample index stays on the TAI grid also when
+        // a frame has no whole number of samples (29.97, 59.94).
+        std::uint64_t _audioEndFrame = 0;
+        std::size_t _maxSamplesPerFrame = 0; // largest block (ceil(48000 / frame rate))
 
         // Late/drop rate tracking for preroll reset (§2.4).
         std::uint64_t _recentLateOrDropped = 0;

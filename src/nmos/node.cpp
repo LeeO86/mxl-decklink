@@ -473,7 +473,7 @@ namespace mxldl::nmosnode
                     }
                     else
                     {
-                        source = nmos::make_data_source(us(leg.sourceId), us(deviceId), nmos::clock_names::clk0, rateOf(mode), model.settings);
+                        source = nmos::make_data_source(us(leg.sourceId), us(deviceId), nmos::clock_names::clk0, ancRateOf(mode), model.settings);
                         flow = nmos::make_sdianc_data_flow(us(flowId), us(leg.sourceId), us(deviceId), model.settings);
                         flow.data[U("grain_rate")] = nmos::make_rational(ancRateOf(mode));
                         flow.data[U("media_type")] = value::string(nmos::media_types::video_smpte291.name);

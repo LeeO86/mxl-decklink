@@ -12,6 +12,16 @@
 
 namespace mxldl::util
 {
+    /// 48 kHz sample index at the TAI start of video frame `frame`
+    /// (mxlTimestampToIndex(48000, mxlIndexToTimestamp(frameRate, frame))).
+    /// The audio block of frame k is [index(k), index(k + 1)): 1920 samples
+    /// at 25 frames/s, 960 at 50, and at 29.97 / 59.94 the 1602/1601 resp.
+    /// 801/800 cadence (8008 samples per 5 frames, 4004 resp.).
+    std::uint64_t audioSampleIndexOfFrame(mxlRational const& frameRate, std::uint64_t frame);
+
+    /// Largest audio block of one frame: ceil(48000 / frame rate).
+    std::size_t maxAudioSamplesPerFrame(mxlRational const& frameRate);
+
     /// 1:1 deinterleave (DeckLink channel i → MXL buffer i).
     void deinterleaveInt32ToFloat(std::int32_t const* src, std::size_t sampleFrames, std::size_t channelCount,
         mxlMutableWrappedMultiBufferSlice const& dst);

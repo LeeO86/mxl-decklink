@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.6
+
+- Outputs at 29.97 and 59.94 frames/s (progressive and interlaced) play their audio. The audio read position was the frame index × floor(48000 / frame rate) samples (1601 instead of 1601.6 at 29.97, 800 instead of 800.8 at 59.94), which at today's TAI frame indexes is about 7.8 days (29.97) or 20.7 days (59.94) behind the sample index the audio sources write, far outside the audio ring, so these outputs played silence for good. Now each frame's audio block runs from the 48 kHz sample index of the frame's TAI start to that of the next frame (`mxlTimestampToIndex(48000, mxlIndexToTimestamp(frame rate, k))`), which gives the 1602/1601 cadence at 29.97 and 801/800 at 59.94 (8008 resp. 4004 samples per 5 frames). The PCM scratch buffers are sized for the largest block at bring-up, and the read-offset cap uses the largest block. Whole rates are unchanged: at 25, 50, 24, 30, 60 and 23.98 frames/s the blocks are exactly the frame index × 1920, 960, 2000, 1600, 800 and 2002 samples, as before.
+- The NMOS ANC source's `grain_rate` follows its flow too: the field rate for interlaced modes (1.0.5 changed the ANC flow and receiver caps only).
+- New unit tests: the block math at today's TAI indexes for whole rates (identical to before) and for 29.97 / 59.94 (cadence, 5-frame sums, within a sample of the TAI time), and outputs at 59.94 and 29.97 with a stamped audio source (sound in every block, 800/801 resp. 1601/1602 blocks, in sync with the video). The 1.0.5 interlaced output test now also requires sound for NTSC (29.97).
+
 ## 1.0.5
 
 Interlaced video (`PAL`, `NTSC`, `HD1080i50`, `HD1080i5994`) now follows the shared convention of the MXL media functions (SPECIFICATION §3.2.2): one field per grain at twice the frame rate, grain 2k = the first field in time of TAI frame k, grain 2k + 1 = the second; the flow definition keeps `grain_rate` = the frame rate and the real `interlace_mode`. Progressive modes are unchanged.
