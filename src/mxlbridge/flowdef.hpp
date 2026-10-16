@@ -24,6 +24,7 @@ namespace mxldl::mxlbridge
         std::int64_t rateNumerator = 0;
         std::int64_t rateDenominator = 1;
         bool interlaced = false;
+        bool bottomFieldFirst = false; // interlaced_bff instead of interlaced_tff
         bool withAlpha = false; // video/v210a
     };
 
@@ -46,7 +47,9 @@ namespace mxldl::mxlbridge
         std::string groupHint;
         std::optional<util::Uuid> sourceId;
         std::optional<util::Uuid> deviceId;
-        std::int64_t rateNumerator = 0; // grain rate follows the video channel
+        // Grain rate: the video's frame rate, or twice it (the field rate)
+        // for an interlaced video (one grain per field).
+        std::int64_t rateNumerator = 0;
         std::int64_t rateDenominator = 1;
     };
 

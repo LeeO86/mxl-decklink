@@ -106,8 +106,12 @@ export function modeNameForFlow(flow, options) {
       : String(flow.rate_numerator);
   if (!fps) return null;
   let name = null;
-  if (flow.height === 720) name = `HD720p${fps}`;
-  else if (flow.height === 1080) name = flow.interlaced ? `HD1080i${fps}` : `HD1080p${fps}`;
+  // An interlaced flow's grain_rate is the frame rate; the mode names the
+  // field rate (HD1080i50 = 25 frames/s).
+  const interlacedName = { 25: { 576: "PAL", 1080: "HD1080i50" }, 2997: { 486: "NTSC", 1080: "HD1080i5994" } }[fps];
+  if (flow.interlaced) name = interlacedName ? interlacedName[flow.height] ?? null : null;
+  else if (flow.height === 720) name = `HD720p${fps}`;
+  else if (flow.height === 1080) name = `HD1080p${fps}`;
   else if (flow.height === 2160) name = `4K2160p${fps}`;
   else if (flow.height === 4320) name = `8K4320p${fps}`;
   return options.includes(name) ? name : null;

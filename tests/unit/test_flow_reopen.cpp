@@ -27,7 +27,9 @@
 #include "mxlbridge/domain.hpp"
 #include "mxlbridge/videowriter.hpp"
 #include "ops/metrics.hpp"
+#include "util/interlace.hpp"
 #include "util/logging.hpp"
+#include "util/v210.hpp"
 
 using namespace mxldl;
 namespace fs = std::filesystem;
@@ -105,6 +107,9 @@ namespace
         std::atomic<int> deliveryLatencyUs{0}; // every completion call comes this late (a real card's latency)
         std::atomic<bool> reportStreamTime{true}; // the card reports its playback position
         std::atomic<bool> streamWholeFrames{false}; // ... in whole frames only
+        std::atomic<bool> keepBytes{false}; // keep the last scheduled frame's bytes
+        std::vector<std::uint8_t> lastBytes;
+        std::uint32_t audioSampleFrames = 0; // of the last audio block
 
         /// Median of audio block - video grain over the pairs from `from`:
         /// constant while audio and video stay in sync.
@@ -212,6 +217,10 @@ namespace
         {
             std::lock_guard const lock{_played->mutex};
             _played->frames.push_back(size > 0 ? bytes[0] : 0);
+            if (_played->keepBytes)
+            {
+                _played->lastBytes.assign(bytes, bytes + size);
+            }
             if (size >= kStampAt + sizeof(std::uint64_t))
             {
                 std::uint64_t index = 0;
@@ -239,6 +248,7 @@ namespace
             }
             std::lock_guard const lock{_played->mutex};
             ++_played->audioBlocks;
+            _played->audioSampleFrames = sampleFrames;
             _played->audioBlocksWithSound += sound ? 1 : 0;
             if (sound && !_played->grains.empty())
             {
@@ -562,6 +572,62 @@ namespace
         std::vector<std::uint8_t> _frame;
         std::uint64_t _last = 0;
         std::chrono::steady_clock::time_point _nextStep{};
+        Pump _pump; // last: stops before the writer goes
+    };
+
+    /// An interlaced video writer (util/interlace.hpp): frame k of the
+    /// current TAI time as field grains 2k and 2k + 1. Byte c of frame line r
+    /// is the low byte of r * 7 + c; line 0 carries k at kStampAt.
+    class InterlacedSource
+    {
+    public:
+        InterlacedSource(mxlbridge::Domain& domain, mxlbridge::VideoFlowParams const& p)
+            : _writer(domain, p, 1)
+            , _rate{p.rateNumerator, p.rateDenominator}
+            , _bff(p.bottomFieldFirst)
+            , _height(p.height)
+            , _lineBytes(util::v210RowBytes(p.width))
+            , _pump([this] {
+                auto const k = ::mxlGetCurrentIndex(&_rate);
+                if (k <= _last)
+                {
+                    return;
+                }
+                std::memcpy(_frame.data() + kStampAt, &k, sizeof k);
+                auto const first = util::fieldParity(2 * k, _bff);
+                (void)_writer.writeField(2 * k, _frame.data(), _lineBytes, _height, first);
+                (void)_writer.writeField(2 * k + 1, _frame.data(), _lineBytes, _height, first ^ 1U);
+                _last = k;
+            })
+        {}
+
+        /// The frame without its stamp.
+        static std::uint8_t expected(std::uint32_t row, std::size_t column)
+        {
+            return static_cast<std::uint8_t>(row * 7 + column);
+        }
+
+    private:
+        static std::vector<std::uint8_t> pattern(std::size_t lineBytes, std::uint32_t height)
+        {
+            std::vector<std::uint8_t> frame(lineBytes * height);
+            for (std::uint32_t r = 0; r < height; ++r)
+            {
+                for (std::size_t c = 0; c < lineBytes; ++c)
+                {
+                    frame[r * lineBytes + c] = expected(r, c);
+                }
+            }
+            return frame;
+        }
+
+        mxlbridge::VideoWriter _writer;
+        mxlRational _rate;
+        bool _bff;
+        std::uint32_t _height;
+        std::size_t _lineBytes;
+        std::vector<std::uint8_t> _frame = pattern(_lineBytes, _height);
+        std::uint64_t _last = 0;
         Pump _pump; // last: stops before the writer goes
     };
 
@@ -1513,4 +1579,73 @@ TEST_CASE("an idle mirror whose first grain needs 2.5 s: the output waits in ini
     out.stop();
     video.reset();
     audio.reset();
+}
+
+TEST_CASE("an interlaced flow plays as woven frames at the frame rate, with a frame's worth of audio per frame (tff PAL, bff NTSC)")
+{
+    for (char const* name : {"PAL", "NTSC"})
+    {
+        CAPTURE(name);
+        Rig rig(name);
+        auto const mode = *config::lookupVideoMode(name);
+        rig.video.width = mode.width;
+        rig.video.height = mode.height;
+        rig.video.rateNumerator = mode.rateNumerator;
+        rig.video.rateDenominator = mode.rateDenominator;
+        rig.video.interlaced = true;
+        rig.video.bottomFieldFirst = mode.bottomFieldFirst;
+        rig.ch.videoModeName = mode.name;
+        rig.ch.videoMode = mode;
+        rig.withAudio();
+        rig.played->keepBytes = true;
+        InterlacedSource video(*rig.domain, rig.video);
+        AudioSource audio(*rig.domain, rig.audio, kStamped);
+        std::this_thread::sleep_for(300ms);
+
+        channel::OutputChannel out(rig.global, rig.ch, *rig.sub, *rig.domain, rig.metrics, "test");
+        out.start();
+        REQUIRE(waitUntil([&] { return out.status().state.load() == channel::State::Healthy; }, 3s));
+        std::this_thread::sleep_for(500ms);
+        auto const from = rig.played->grainCount();
+        auto const t0 = std::chrono::steady_clock::now();
+        std::this_thread::sleep_for(2s);
+        auto const seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        auto const scheduled = static_cast<double>(rig.played->grainCount() - from);
+        out.stop();
+
+        // One frame (two field grains) per output frame: the frame index
+        // goes up by one per frame, at the frame rate.
+        CHECK(scheduled / seconds == doctest::Approx(mode.fps()).epsilon(0.15));
+        CHECK(rig.played->largestGrainStep(from) == 1);
+        CHECK(rig.counter("mxl_decklink_frames_repeated_total", "reason", "source_late") == 0.0);
+        // 48 kHz / frame rate: 1920 samples at 25 frames/s, 1601 or 1602 at
+        // 29.97 (the integer part, as for progressive 59.94).
+        CHECK(rig.played->audioSampleFrames == static_cast<std::uint32_t>(48000 * mode.rateDenominator / mode.rateNumerator));
+        if (mode.rateDenominator == 1)
+        {
+            // Not at 29.97: the audio read position is frame index x
+            // samples per frame, which is off the TAI sample grid when the
+            // samples per frame are not whole (also for progressive 59.94).
+            CHECK(rig.played->soundBlocks() > 0);
+        }
+
+        // The last frame shown: every line back in its place.
+        std::lock_guard const lock{rig.played->mutex};
+        auto const& frame = rig.played->lastBytes;
+        std::size_t const lineBytes = util::v210RowBytes(mode.width);
+        REQUIRE(frame.size() == lineBytes * mode.height);
+        std::size_t wrong = 0;
+        for (std::uint32_t r = 0; r < mode.height; ++r)
+        {
+            for (std::size_t c = 0; c < lineBytes; ++c)
+            {
+                if (r == 0 && c >= kStampAt && c < kStampAt + sizeof(std::uint64_t))
+                {
+                    continue;
+                }
+                wrong += frame[r * lineBytes + c] != InterlacedSource::expected(r, c) ? 1 : 0;
+            }
+        }
+        CHECK(wrong == 0);
+    }
 }

@@ -16,7 +16,10 @@ namespace mxldl::config
             return {
                 // SD
                 {"PAL", bmdModePAL, 720, 576, 25, 1, true},
-                {"NTSC", bmdModeNTSC, 720, 486, 30000, 1001, true},
+                // NTSC is lower field first (IDeckLinkDisplayMode::
+                // GetFieldDominance: bmdLowerFieldFirst); the others are upper
+                // field first.
+                {"NTSC", bmdModeNTSC, 720, 486, 30000, 1001, true, true},
 
                 // HD 720p
                 {"HD720p50", bmdModeHD720p50, 1280, 720, 50, 1, false},

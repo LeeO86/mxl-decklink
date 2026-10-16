@@ -38,6 +38,10 @@ TEST_CASE("video flow definition JSON carries the MXL v1.0 required fields")
     p.interlaced = true;
     auto const jsonI = buildVideoFlowDef(p);
     CHECK(jsonI.find("\"interlace_mode\":\"interlaced_tff\"") != std::string::npos);
+
+    p.bottomFieldFirst = true;
+    auto const jsonB = buildVideoFlowDef(p);
+    CHECK(jsonB.find("\"interlace_mode\":\"interlaced_bff\"") != std::string::npos);
 }
 
 TEST_CASE("audio flow definition JSON")

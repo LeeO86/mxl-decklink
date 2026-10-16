@@ -73,7 +73,7 @@ Then the MXL sequence runs: `mxlFlowWriterOpenGrain(inst, writer, grainIndex, &g
 
 In parallel, `audioPacket->GetBytes(&pcm)` is read. Because DeckLink delivers interleaved PCM (`bmdAudioSampleType32bitInteger`, 48 kHz) and MXL expects `audio/float32` deinterleaved per channel in a `channels` blob, the bridge converts in flight: for each sample, `float32 = int32 / 2147483648.0f`, deinterleaving into an `mxlMutableWrappedMultiBufferSlice`. The slice structure addresses ring-buffer wraparound via two fragments. `mxlFlowWriterOpenSamples` / `CommitSamples` open and finalize the batch.
 
-For ANC data, `IDeckLinkVideoFrameAncillaryPackets` is iterated and written into a `video/smpte291` flow per RFC 8331 §2 (from the length field onward) when the channel has ANC enabled. The callback must complete well under the frame interval (at 1080p50: <20 ms) — therefore no blocking operations inside it.
+For ANC data, `IDeckLinkVideoFrameAncillaryPackets` is iterated and written into a `video/smpte291` flow per RFC 8331 §2 (from the length field onward) when the channel has ANC enabled (one grain per field for interlaced modes, §3.2.2). The callback must complete well under the frame interval (at 1080p50: <20 ms) — therefore no blocking operations inside it.
 
 ### 2.4 Data Flow, Output Path (MXL → DeckLink)
 
@@ -143,6 +143,15 @@ With an explicit `CHx_VIDEO_MODE` (e.g. `HD1080p50`, `4K2160p50`), the container
 
 The container maintains this mapping internally. Essential entries (non-exhaustive): `HD720p50 → bmdModeHD720p50`, `HD720p5994 → bmdModeHD720p5994`, `HD1080i50 → bmdModeHD1080i50`, `HD1080p24 → bmdModeHD1080p24`, `HD1080p25 → bmdModeHD1080p25`, `HD1080p2997 → bmdModeHD1080p2997`, `HD1080p50 → bmdModeHD1080p50`, `HD1080p5994 → bmdModeHD1080p5994`, `4K2160p25 → bmdMode4K2160p25`, `4K2160p50 → bmdMode4K2160p50`, `4K2160p5994 → bmdMode4K2160p5994`, `4K2160p60 → bmdMode4K2160p60`, `8K4320p50 → bmdMode8K4320p50`, `8K4320p60 → bmdMode8K4320p60`. Modes not in the table are rejected.
 
+#### 3.2.2 Interlaced Modes (`PAL`, `NTSC`, `HD1080i50`, `HD1080i5994`)
+
+The container follows the shared convention of the MXL media functions (MXL `218ddaa`). The flow definition keeps `grain_rate` = the frame rate (25/1 or 30000/1001) and the real `interlace_mode`; MXL then stores **one field per grain** (height / 2 lines) at twice that rate. Grain 2k is the first field in time of TAI frame k (k = `mxlTimestampToIndex` at the frame rate), grain 2k + 1 the second. `interlaced_tff`: the first field is the top field, the even frame lines (0, 2, 4, …); `interlaced_bff`: the bottom field, the odd lines. A reader weaves grain i into the frame lines of parity `(i & 1) ^ bff`. MXL has no per-grain field marker, so a reader cannot detect a writer that puts the first field on an odd index.
+
+- **Field order** comes from the mode table: `NTSC` is lower field first (`bmdLowerFieldFirst` in `IDeckLinkDisplayMode::GetFieldDominance`), so its flow is `interlaced_bff`; `PAL`, `HD1080i50` and `HD1080i5994` are `interlaced_tff`. The MXL flow definition and the NMOS flow and receiver caps carry it.
+- **Input:** k comes from the frame's start, one frame period before its timestamp (§3.5; the frame arrives when it is complete). The bridge writes grain 2k from the first field's lines and grain 2k + 1 from the other lines of the woven DeckLink frame, by row (v210 directly, 8-bit YUV after the expansion of §3.3; for `video/v210a` the fill lines).
+- **ANC** of an interlaced input runs at the **field rate**: the `video/smpte291` flow is declared at twice the frame rate (50/1 for 1080i50, 60000/1001 for 1080i59.94). The packets of field 1 go to grain 2k and those of field 2 to grain 2k + 1, the index of the video field; a field without packets gets an empty grain. The field follows from the packet's SMPTE line number: 1080i lines 564–1125, 625-line lines 313–625 and 525-line lines 266–525 and 1–3 are field 2. Progressive ANC stays at the frame rate.
+- **Output:** a flow whose `interlace_mode` is `interlaced_tff` or `interlaced_bff` is read as frames: for frame k the channel reads grains 2k and 2k + 1 and weaves them into the DeckLink frame. Every frame count of §2.4 (read position, preroll, read offset, catch-up, slips, the sync-group wait, which waits for the second field's time) is in frames, and the audio per frame is 48000 / frame rate samples (1920 at 25 frames/s). A frame with an invalid field is repeated like an invalid grain. The output does not read ANC.
+
 ### 3.3 Pixel Format Mapping
 
 MXL v1.0 supports exactly two video formats: **`video/v210`** (10-bit YUV 4:2:2, Apple/SMPTE v210 layout) and **`video/v210a`** (v210 plus alpha, for fill+key). This is fortunately congruent with the DeckLink standard format `bmdFormat10BitYUV`, which uses the same bit packing (6 pixels in 16 bytes, 128-byte row alignment). The container therefore uses **`bmdFormat10BitYUV` as the default**. `IDeckLinkOutput::RowBytesForPixelFormat` is used to compute row bytes instead of hand-rolled formulas.
@@ -165,7 +174,7 @@ In mode **`MXL_TIMESTAMP_SOURCE=hardware`**, the container uses `IDeckLinkVideoI
 
 In mode **`MXL_TIMESTAMP_SOURCE=host`**, the container takes `clock_gettime(CLOCK_TAI)` at callback entry as the frame timestamp — simpler, but subject to callback jitter (typically ±0.5 ms).
 
-The grain index follows from `mxlTimestampToIndex(&grainRate, tai_ns)`. For signal-loss frames (`bmdFrameHasNoInputSource` set), no grain is committed; a gap in the ring buffer is accepted so readers detect the outage via `MXL_GRAIN_FLAG_INVALID` or the missing sample index.
+The grain index follows from `mxlTimestampToIndex(&grainRate, tai_ns)`; interlaced modes write two field grains from the frame index of the frame's start (§3.2.2). For signal-loss frames (`bmdFrameHasNoInputSource` set), no grain is committed; a gap in the ring buffer is accepted so readers detect the outage via `MXL_GRAIN_FLAG_INVALID` or the missing sample index.
 
 ### 3.6 Behavior on Signal Loss
 
@@ -443,7 +452,7 @@ Every setting displays its **provenance** (default / file / environment). Settin
 
 #### 7.5.4 Flow-to-output assignment
 
-The MXL tab allows selecting any **video flow** (and matching audio flow) discovered in the attached domain and assigning it to an output channel. The UI derives the required `CHx_VIDEO_MODE` from the flow descriptor (`frame_width`/`frame_height`/`grain_rate`/`interlace_mode`) and warns when no DeckLink mode of the card matches the flow geometry. The assignment is a normal per-channel configuration change (§7.5.3).
+The MXL tab allows selecting any **video flow** (and matching audio flow) discovered in the attached domain and assigning it to an output channel. The UI derives the required `CHx_VIDEO_MODE` from the flow descriptor (`frame_width`/`frame_height`/`grain_rate`/`interlace_mode`; an interlaced flow's `grain_rate` is its frame rate, so 1080 lines at 25/1 map to `HD1080i50`, 30000/1001 to `HD1080i5994`, 576 lines at 25/1 to `PAL` and 486 lines at 30000/1001 to `NTSC`) and warns when no DeckLink mode of the card matches the flow geometry. The assignment is a normal per-channel configuration change (§7.5.3).
 
 #### 7.5.5 Security
 

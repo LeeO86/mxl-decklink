@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24 FATAL_ERROR)
 
 project(mxl-decklink
-    VERSION 1.0.4
+    VERSION 1.0.5
     DESCRIPTION "MXL MediaFunction container for Blackmagic DeckLink"
     LANGUAGES CXX
 )
@@ -112,6 +112,7 @@ add_library(mxl-decklink-core STATIC
     src/util/logging.cpp
     src/util/taiclock.cpp
     src/util/v210.cpp
+    src/util/interlace.cpp
     src/util/audioconv.cpp
     src/util/anc.cpp
     src/util/uuid.cpp
@@ -205,6 +206,7 @@ if(MXL_DECKLINK_BUILD_TESTS)
         tests/unit/test_route_state.cpp
         tests/unit/test_flowsync.cpp
         tests/unit/test_flow_reopen.cpp
+        tests/unit/test_interlace.cpp
     )
     target_link_libraries(unit-tests PRIVATE mxl-decklink-core)
     add_test(NAME unit-tests COMMAND unit-tests)

@@ -73,7 +73,11 @@ namespace mxldl::nmosnode
 
         nmos::interlace_mode interlaceOf(config::VideoMode const& mode)
         {
-            return mode.interlaced ? nmos::interlace_modes::interlaced_tff : nmos::interlace_modes::progressive;
+            if (!mode.interlaced)
+            {
+                return nmos::interlace_modes::progressive;
+            }
+            return mode.bottomFieldFirst ? nmos::interlace_modes::interlaced_bff : nmos::interlace_modes::interlaced_tff;
         }
 
         nmos::media_type videoMedia(config::ChannelConfig const& ch)
