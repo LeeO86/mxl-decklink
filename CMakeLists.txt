@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24 FATAL_ERROR)
 
 project(mxl-decklink
-    VERSION 1.0.6
+    VERSION 1.0.7
     DESCRIPTION "MXL MediaFunction container for Blackmagic DeckLink"
     LANGUAGES CXX
 )

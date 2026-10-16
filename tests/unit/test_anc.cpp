@@ -37,13 +37,13 @@ TEST_CASE("RFC 8331 encode/decode round-trip")
     auto const encoded = encodeRfc8331(packets, 4096);
     CHECK(encoded.packetsEncoded == 2);
     CHECK(encoded.packetsDropped == 0);
-    REQUIRE(encoded.payload.size() >= 8);
-    // Header: Length(16) covers everything after the 8-byte header.
+    REQUIRE(encoded.payload.size() >= 6);
+    // Header: Length(16) covers everything after the 6-byte header.
     std::size_t const length = (static_cast<std::size_t>(encoded.payload[0]) << 8) | encoded.payload[1];
-    CHECK(length == encoded.payload.size() - 8);
+    CHECK(length == encoded.payload.size() - 6);
     CHECK(encoded.payload[2] == 2); // ANC_Count
-    // Data section is 32-bit aligned.
-    CHECK(encoded.payload.size() % 4 == 0);
+    // Each packet is a multiple of 32 bits.
+    CHECK(length % 4 == 0);
 
     auto const decoded = decodeRfc8331(encoded.payload.data(), encoded.payload.size());
     REQUIRE(decoded.size() == 2);
@@ -62,7 +62,7 @@ TEST_CASE("empty packet list yields a valid empty payload")
 {
     auto const encoded = encodeRfc8331({}, 4096);
     CHECK(encoded.packetsEncoded == 0);
-    REQUIRE(encoded.payload.size() == 8);
+    REQUIRE(encoded.payload.size() == 6);
     CHECK(encoded.payload[0] == 0);
     CHECK(encoded.payload[1] == 0);
     CHECK(encoded.payload[2] == 0);
@@ -79,7 +79,7 @@ TEST_CASE("oversized packets are dropped, not truncated")
     auto const encoded = encodeRfc8331({big}, 64);
     CHECK(encoded.packetsEncoded == 0);
     CHECK(encoded.packetsDropped == 1);
-    CHECK(encoded.payload.size() == 8);
+    CHECK(encoded.payload.size() == 6);
 
     // Large grain: packet fits.
     auto const encoded2 = encodeRfc8331({big}, 4096);
@@ -97,13 +97,13 @@ TEST_CASE("checksum word follows ST 291-1 (9-bit sum, b9 = !b8)")
     p.userData = {0x10};
     auto const e = encodeRfc8331({p}, 4096);
 
-    // Decode manually to reach the checksum: skip header (8 bytes), then
+    // Decode manually to reach the checksum: skip header (6 bytes), then
     // C(1)+Line(11)+HO(12)+S(1)+Stream(7) = 32 bits, then DID/SDID/DC/UDW/CS.
     auto bits = [&](std::size_t bitPos, unsigned n) {
         std::uint32_t v = 0;
         for (unsigned i = 0; i < n; ++i, ++bitPos)
         {
-            v = (v << 1) | ((e.payload[8 + bitPos / 8] >> (7 - bitPos % 8)) & 1U);
+            v = (v << 1) | ((e.payload[6 + bitPos / 8] >> (7 - bitPos % 8)) & 1U);
         }
         return v;
     };
@@ -138,4 +138,39 @@ TEST_CASE("RFC 8331 F bits: 00 progressive (default), 10 field 1, 11 field 2")
     auto const decoded = decodeRfc8331(b.payload.data(), b.payload.size());
     REQUIRE(decoded.size() == 1);
     CHECK(decoded[0].lineNumber == 9);
+}
+
+TEST_CASE("grain bytes are the RFC 8331 payload from the Length field on, as MXL stores it")
+{
+    // Reference vector: mxl-st2110-gateway codec::serialiseGrain (the gateway's ANC ingest and
+    // egress codec, which follows MXL docs/Architecture.md and mxl-data-probe) for the same two
+    // packets, field 1: the gateway's AFD golden packet (with C = 1, as a known line sets it here)
+    // and a packet with stream number 2. Length(16) ANC_Count(8) F(2) reserved(22), then the
+    // first packet at byte 6 and the second at byte 26 (each a multiple of 32 bits).
+    std::vector<std::uint8_t> const reference = {0x00, 0x24, 0x02, 0x80, 0x00, 0x00, 0x80, 0xB0, 0x00, 0x00, 0x90, 0x60, 0x54, 0x21,
+        0x08, 0x80, 0x20, 0x08, 0x02, 0x00, 0x80, 0x20, 0x08, 0x02, 0x56, 0x00, 0x80, 0x90, 0x00, 0x82, 0x58, 0x50, 0x18, 0x0E, 0xAA,
+        0x95, 0x50, 0x19, 0x94, 0x00, 0x00, 0x00};
+    AncPacket afd;
+    afd.did = 0x41;
+    afd.sdid = 0x05;
+    afd.lineNumber = 11;
+    afd.userData = {0x08, 0, 0, 0, 0, 0, 0, 0};
+    AncPacket other;
+    other.did = 0x61;
+    other.sdid = 0x01;
+    other.lineNumber = 9;
+    other.dataStreamIndex = 2;
+    other.userData = {0xaa, 0x55, 0x01};
+
+    auto const encoded = encodeRfc8331({afd, other}, 4096, kAncField1);
+    CHECK(encoded.packetsEncoded == 2);
+    CHECK(encoded.payload == reference);
+
+    auto const decoded = decodeRfc8331(reference.data(), reference.size());
+    REQUIRE(decoded.size() == 2);
+    CHECK(decoded[0].lineNumber == 11);
+    CHECK(decoded[0].userData == afd.userData);
+    CHECK(decoded[1].lineNumber == 9);
+    CHECK(decoded[1].dataStreamIndex == 2);
+    CHECK(decoded[1].userData == other.userData);
 }
