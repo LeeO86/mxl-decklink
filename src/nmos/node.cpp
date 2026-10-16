@@ -71,9 +71,21 @@ namespace mxldl::nmosnode
             return nmos::rational{mode.rateNumerator, mode.rateDenominator};
         }
 
+        /// ANC data flow grain rate, as in the MXL flow definition: the
+        /// field rate (twice the frame rate) for interlaced modes (one grain
+        /// per field). Video keeps the frame rate.
+        nmos::rational ancRateOf(config::VideoMode const& mode)
+        {
+            return nmos::rational{mode.interlaced ? 2 * mode.rateNumerator : mode.rateNumerator, mode.rateDenominator};
+        }
+
         nmos::interlace_mode interlaceOf(config::VideoMode const& mode)
         {
-            return mode.interlaced ? nmos::interlace_modes::interlaced_tff : nmos::interlace_modes::progressive;
+            if (!mode.interlaced)
+            {
+                return nmos::interlace_modes::progressive;
+            }
+            return mode.bottomFieldFirst ? nmos::interlace_modes::interlaced_bff : nmos::interlace_modes::interlaced_tff;
         }
 
         nmos::media_type videoMedia(config::ChannelConfig const& ch)
@@ -463,7 +475,7 @@ namespace mxldl::nmosnode
                     {
                         source = nmos::make_data_source(us(leg.sourceId), us(deviceId), nmos::clock_names::clk0, rateOf(mode), model.settings);
                         flow = nmos::make_sdianc_data_flow(us(flowId), us(leg.sourceId), us(deviceId), model.settings);
-                        flow.data[U("grain_rate")] = nmos::make_rational(rateOf(mode));
+                        flow.data[U("grain_rate")] = nmos::make_rational(ancRateOf(mode));
                         flow.data[U("media_type")] = value::string(nmos::media_types::video_smpte291.name);
                     }
                     auto const role = leg.kind == nmosroute::LegKind::Video ? "Video" : leg.kind == nmosroute::LegKind::Audio ? "Audio" : "Data";
@@ -544,7 +556,7 @@ namespace mxldl::nmosnode
                         receiver = nmos::make_sdianc_data_receiver(us(leg.id), us(deviceId), nmos::transports::mxl, {}, model.settings);
                         web::json::value set = web::json::value::object();
                         set[U("urn:x-nmos:cap:format:media_type")] = nmos::make_caps_string_constraint({nmos::media_types::video_smpte291.name});
-                        set[U("urn:x-nmos:cap:format:grain_rate")] = nmos::make_caps_rational_constraint({rateOf(mode)});
+                        set[U("urn:x-nmos:cap:format:grain_rate")] = nmos::make_caps_rational_constraint({ancRateOf(mode)});
                         receiver.data[U("caps")] = capsWith(std::move(set), nmos::media_types::video_smpte291.name);
                     }
                     auto const role = leg.kind == nmosroute::LegKind::Video ? "Video" : leg.kind == nmosroute::LegKind::Audio ? "Audio" : "Data";
@@ -666,7 +678,7 @@ namespace mxldl::nmosnode
                     else
                     {
                         flow = nmos::make_sdianc_data_flow(us(flowId), us(leg.sourceId), us(deviceId), model->settings);
-                        flow.data[U("grain_rate")] = nmos::make_rational(rateOf(mode));
+                        flow.data[U("grain_rate")] = nmos::make_rational(ancRateOf(mode));
                         setLabel(flow, ch->label + " Data", "mxl-decklink flow");
                     }
                     insert(*model, model->node_resources, std::move(flow));

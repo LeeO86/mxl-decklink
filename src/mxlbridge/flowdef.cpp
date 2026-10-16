@@ -52,7 +52,7 @@ namespace mxldl::mxlbridge
         out += "\"frame_width\":" + std::to_string(p.width) + ",";
         out += "\"frame_height\":" + std::to_string(p.height) + ",";
         out += "\"interlace_mode\":\"";
-        out += p.interlaced ? "interlaced_tff" : "progressive";
+        out += !p.interlaced ? "progressive" : p.bottomFieldFirst ? "interlaced_bff" : "interlaced_tff";
         out += "\",";
         out += "\"colorspace\":\"BT709\",";
         out += "\"components\":[";

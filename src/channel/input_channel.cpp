@@ -5,6 +5,7 @@
 
 #include <mxl/time.h>
 
+#include "util/interlace.hpp"
 #include "util/logging.hpp"
 #include "util/threading.hpp"
 #include "util/v210.hpp"
@@ -332,6 +333,7 @@ namespace mxldl::channel
             vp.rateNumerator = mode.rateNumerator;
             vp.rateDenominator = mode.rateDenominator;
             vp.interlaced = mode.interlaced;
+            vp.bottomFieldFirst = mode.bottomFieldFirst;
             vp.withAlpha = _cfg.pixelFormat == config::PixelFormat::YUVA10;
             _videoWriter = std::make_unique<mxlbridge::VideoWriter>(_domain, vp, _cfg.commitBatchHintVideo);
 
@@ -387,7 +389,9 @@ namespace mxldl::channel
             np.groupHint = _cfg.groupHint + ":ANC";
             np.sourceId = _cfg.sourceId;
             np.deviceId = _cfg.deviceId;
-            np.rateNumerator = mode.rateNumerator;
+            // Interlaced: one ANC grain per field, at the field rate (shared
+            // convention, util/interlace.hpp).
+            np.rateNumerator = mode.interlaced ? 2 * mode.rateNumerator : mode.rateNumerator;
             np.rateDenominator = mode.rateDenominator;
             _ancWriter = std::make_unique<mxlbridge::AncWriter>(_domain, np);
         }
@@ -456,12 +460,26 @@ namespace mxldl::channel
         }
 
         auto const tai = frameTimestampTai(video);
-        mxlRational rate{_currentMode.rateNumerator, _currentMode.rateDenominator};
-        if (_videoWriter)
+        // Interlaced (util/interlace.hpp): frame k from the frame's start
+        // time at the frame rate (the frame arrives one frame period after it
+        // started); its first field goes to grain 2k, the second to 2k + 1.
+        // Progressive: the grain of the arrival time, as before.
+        bool const fields = _currentMode.interlaced;
+        mxlRational const frameRate{_currentMode.rateNumerator, _currentMode.rateDenominator};
+        std::uint64_t grainIndex = 0; // interlaced: the first field's grain
+        if (fields)
         {
-            rate = _videoWriter->grainRate();
+            grainIndex = util::firstFieldGrainIndex(frameRate, tai);
         }
-        auto const grainIndex = ::mxlTimestampToIndex(&rate, tai);
+        else
+        {
+            mxlRational rate = frameRate;
+            if (_videoWriter)
+            {
+                rate = _videoWriter->grainRate();
+            }
+            grainIndex = ::mxlTimestampToIndex(&rate, tai);
+        }
 
         if (!_videoWriter)
         {
@@ -472,29 +490,44 @@ namespace mxldl::channel
         else
         {
         // Video grain (§2.3): one memcpy for v210; expansion for 8-bit.
+        // Interlaced: two field grains, each from every second frame line.
         auto const commitStart = util::taiNowNs();
         mxlStatus status;
+        std::uint8_t const* frame = video.bytes;
+        std::size_t frameRowBytes = video.rowBytes;
         if (_cfg.pixelFormat == config::PixelFormat::YUV8)
         {
             auto const dstRowBytes = util::v210RowBytes(video.width);
             _conversionBuffer.resize(static_cast<std::size_t>(dstRowBytes) * video.height);
             util::expandUyvyToV210(video.bytes, video.rowBytes, _conversionBuffer.data(), dstRowBytes, video.width, video.height);
-            status = _videoWriter->writeFrame(grainIndex, _conversionBuffer.data(), _conversionBuffer.size());
+            frame = _conversionBuffer.data();
+            frameRowBytes = dstRowBytes;
+        }
+        std::uint64_t grains = 1;
+        if (fields)
+        {
+            grains = 2;
+            auto const first = util::fieldParity(grainIndex, _currentMode.bottomFieldFirst);
+            status = _videoWriter->writeField(grainIndex, frame, frameRowBytes, video.height, first);
+            if (status == MXL_STATUS_OK)
+            {
+                status = _videoWriter->writeField(grainIndex + 1, frame, frameRowBytes, video.height, first ^ 1U);
+            }
         }
         else
         {
-            status = _videoWriter->writeFrame(grainIndex, video.bytes, video.rowBytes * video.height);
+            status = _videoWriter->writeFrame(grainIndex, frame, frameRowBytes * video.height);
         }
 
         if (status == MXL_STATUS_OK)
         {
             auto const commitEnd = util::taiNowNs();
             _commitLatency->observe(static_cast<double>(commitEnd - commitStart) / 1e9);
-            _grainsCommitted->inc();
-            _grainsWrittenBytes->inc(static_cast<double>(_videoWriter->grainPayloadSize()));
-            _status.grainsCommitted.fetch_add(1);
+            _grainsCommitted->inc(static_cast<double>(grains));
+            _grainsWrittenBytes->inc(static_cast<double>(grains * _videoWriter->grainPayloadSize()));
+            _status.grainsCommitted.fetch_add(grains);
             _status.lastFrameTaiNs.store(tai);
-            _headIndexGauge->set(static_cast<double>(grainIndex));
+            _headIndexGauge->set(static_cast<double>(grainIndex + grains - 1));
         }
         else
         {
@@ -553,12 +586,31 @@ namespace mxldl::channel
         }
 
         // ANC (§2.3): RFC 8331 grain aligned with the video grain index.
+        // Interlaced: each field's packets at its field's grain, RFC 8331 F
+        // = field 1 / field 2 (when only one field has packets, the other
+        // gets an empty grain; a frame without packets writes none).
         if (_cfg.ancEnable && _ancWriter && !video.ancPackets.empty())
         {
-            auto const ancStatus = _ancWriter->writePackets(grainIndex, video.ancPackets);
-            if (ancStatus != MXL_STATUS_OK)
+            auto writeAnc = [this](std::uint64_t index, std::vector<util::AncPacket> const& packets, std::uint8_t field) {
+                auto const ancStatus = _ancWriter->writePackets(index, packets, field);
+                if (ancStatus != MXL_STATUS_OK)
+                {
+                    log::debug("anc_write_failed", {{"channel_index", _cfg.index}, {"status", static_cast<int>(ancStatus)}});
+                }
+            };
+            if (fields)
             {
-                log::debug("anc_write_failed", {{"channel_index", _cfg.index}, {"status", static_cast<int>(ancStatus)}});
+                std::vector<util::AncPacket> perField[2];
+                for (auto const& p : video.ancPackets)
+                {
+                    perField[util::ancLineInSecondField(_currentMode.height, p.lineNumber) ? 1 : 0].push_back(p);
+                }
+                writeAnc(grainIndex, perField[0], util::kAncField1);
+                writeAnc(grainIndex + 1, perField[1], util::kAncField2);
+            }
+            else
+            {
+                writeAnc(grainIndex, video.ancPackets, util::kAncFieldProgressive);
             }
         }
 

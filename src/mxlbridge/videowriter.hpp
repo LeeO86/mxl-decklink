@@ -29,6 +29,13 @@ namespace mxldl::mxlbridge
         /// or the fill-plane size for v210a. Returns MXL status.
         mxlStatus writeFrame(std::uint64_t grainIndex, std::uint8_t const* frameData, std::size_t frameBytes);
 
+        /// Interlaced flow: copies the frame lines of `parity` (parity,
+        /// parity + 2, ...) of a woven v210 frame into the field grain at
+        /// `grainIndex` (height / 2 rows) and commits it. For v210a only the
+        /// fill rows are written.
+        mxlStatus writeField(std::uint64_t grainIndex, std::uint8_t const* frameData, std::size_t frameRowBytes, std::uint32_t frameHeight,
+            unsigned parity);
+
         /// Writes fill+key planes for video/v210a flows.
         mxlStatus writeFrameWithKey(std::uint64_t grainIndex, std::uint8_t const* fill, std::size_t fillBytes, std::uint8_t const* key,
             std::size_t keyBytes);

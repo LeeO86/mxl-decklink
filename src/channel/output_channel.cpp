@@ -713,6 +713,7 @@ namespace mxldl::channel
                     {"flow_id", _cfg.videoFlowId.toString()},
                     {"preroll_grains", _cfg.outputPrerollGrains},
                     {"sync_group", true},
+                    {"interlaced", _videoReader->interlaced()},
                 });
             return true;
         }
@@ -788,7 +789,8 @@ namespace mxldl::channel
             }
             if (_sync)
             {
-                auto const timestamp = ::mxlIndexToTimestamp(&_videoRate, grainIndex);
+                // Interlaced: the time of the frame's second field.
+                auto const timestamp = _videoReader->syncTimestamp(grainIndex);
                 if (timestamp != std::numeric_limits<std::uint64_t>::max())
                 {
                     // One wait covers the video grain and the audio sample at
@@ -1417,7 +1419,9 @@ namespace mxldl::channel
             try
             {
                 newVideo = std::make_unique<mxlbridge::VideoReader>(readerDomain(_cfg.readerDomainPath), _cfg.videoFlowId.toString());
-                formatChanged = formatChanged || !sameVideoFormat(newVideo->configInfo(), _videoConfig);
+                // The frame rate also tells progressive from interlaced
+                // (the same grain rate in MXL).
+                formatChanged = formatChanged || !sameVideoFormat(newVideo->configInfo(), _videoConfig) || !sameRate(newVideo->grainRate(), _videoRate);
             }
             catch (std::exception const& e)
             {

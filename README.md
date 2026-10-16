@@ -312,7 +312,11 @@ The build always contains a deterministic **mock DeckLink backend**
 counter band, a 1 kHz tone, an ANC test packet, TAI-paced callbacks, and
 scriptable fault injection (`MOCK_SIGNAL_LOSS_AFTER_FRAMES`,
 `MOCK_FORMAT_CHANGE_AFTER_FRAMES`, `MOCK_SUBDEVICE_COUNT`). This drives the
-identical channel/MXL code paths as real hardware.
+identical channel/MXL code paths as real hardware. In interlaced modes the
+counter band of the odd lines is mid grey, so the two fields of a frame can be
+told apart. `MOCK_PLAYBACK_FRAME_FILE=<path>` makes the mock output
+write every 25th frame it is given to that file, to check what an output
+plays.
 
 ```bash
 # unit tests

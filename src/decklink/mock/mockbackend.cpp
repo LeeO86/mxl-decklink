@@ -10,10 +10,19 @@
 //   MOCK_SIGNAL_LOSS_DURATION_FRAMES how long the outage lasts (default 50)
 //   MOCK_FORMAT_CHANGE_AFTER_FRAMES  frames until a format change to
 //                                    MOCK_FORMAT_CHANGE_MODE (default HD720p50)
+//   MOCK_PLAYBACK_FRAME_FILE         playback writes every 25th scheduled
+//                                    frame's bytes to this file (replaced
+//                                    atomically), so a lab run can check
+//                                    what an output plays
+//
+// Interlaced modes: the counter band of the odd frame lines is mid grey, so
+// each field can be told apart in the MXL grains.
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -37,6 +46,7 @@ namespace mxldl::dl
             std::int64_t signalLossDurationFrames = 50;
             std::int64_t formatChangeAfterFrames = -1;
             std::string formatChangeMode = "HD720p50";
+            std::string playbackFrameFile;
         };
 
         MockOptions readOptions(config::EnvReader const& env)
@@ -58,12 +68,18 @@ namespace mxldl::dl
             {
                 opt.formatChangeMode = *v;
             }
+            if (auto const v = env("MOCK_PLAYBACK_FRAME_FILE"); v && !v->empty())
+            {
+                opt.playbackFrameFile = *v;
+            }
             return opt;
         }
 
         /// Fills a v210 frame with 8 vertical color bars plus a moving
-        /// counter band encoded in the luma of the last 32 rows.
-        void renderBars(std::vector<std::uint8_t>& frame, std::uint32_t width, std::uint32_t height, std::size_t rowBytes, std::uint64_t counter)
+        /// counter band encoded in the luma of the last 32 rows. Interlaced:
+        /// the odd lines' band is mid grey (luma 512).
+        void renderBars(std::vector<std::uint8_t>& frame, std::uint32_t width, std::uint32_t height, std::size_t rowBytes, std::uint64_t counter,
+            bool interlaced)
         {
             struct YCbCr
             {
@@ -103,7 +119,11 @@ namespace mxldl::dl
                     {
                         // Luma; encode the counter as alternating stripes in
                         // the bottom band so tests can assert frame advance.
-                        if (y >= counterBandStart)
+                        if (y >= counterBandStart && interlaced && (y & 1U) != 0)
+                        {
+                            component = 512;
+                        }
+                        else if (y >= counterBandStart)
                         {
                             bool const bit = ((pixel / 16) + counter) % 2 == 0;
                             component = bit ? 940 : 64;
@@ -316,7 +336,7 @@ namespace mxldl::dl
                         }
                         else
                         {
-                            renderBars(videoFrame, mode.width, mode.height, rowBytes, frameCounter);
+                            renderBars(videoFrame, mode.width, mode.height, rowBytes, frameCounter, mode.interlaced);
                         }
                         view.bytes = videoFrame.data();
 
@@ -402,8 +422,9 @@ namespace mxldl::dl
         class MockPlaybackSession final : public IPlaybackSession
         {
         public:
-            explicit MockPlaybackSession(std::shared_ptr<MockSharedStatus> shared)
-                : _shared(std::move(shared))
+            MockPlaybackSession(std::shared_ptr<MockSharedStatus> shared, std::string frameFile)
+                : _frameFile(std::move(frameFile))
+                , _shared(std::move(shared))
             {}
 
             ~MockPlaybackSession() override
@@ -418,10 +439,19 @@ namespace mxldl::dl
                 return std::nullopt;
             }
 
-            std::optional<std::uint64_t> scheduleFrame(std::uint8_t const* /*bytes*/, std::size_t /*size*/, std::int64_t /*displayTime*/,
+            std::optional<std::uint64_t> scheduleFrame(std::uint8_t const* bytes, std::size_t size, std::int64_t /*displayTime*/,
                 std::int64_t /*displayDuration*/, std::int64_t /*timeScale*/) override
             {
                 std::uint64_t const id = _nextFrameId.fetch_add(1);
+                if (!_frameFile.empty() && id % 25 == 0)
+                {
+                    auto const tmp = _frameFile + ".tmp";
+                    {
+                        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+                        out.write(reinterpret_cast<char const*>(bytes), static_cast<std::streamsize>(size));
+                    }
+                    std::rename(tmp.c_str(), _frameFile.c_str());
+                }
                 _bufferedFrames.fetch_add(1);
                 return id;
             }
@@ -540,6 +570,7 @@ namespace mxldl::dl
 
             Params _params;
             PlaybackCallbacks _callbacks;
+            std::string _frameFile;
             std::atomic<bool> _running{false};
             std::atomic<std::uint64_t> _nextFrameId{1};
             std::atomic<std::uint32_t> _bufferedFrames{0};
@@ -630,7 +661,7 @@ namespace mxldl::dl
 
             std::unique_ptr<IPlaybackSession> openPlayback() override
             {
-                return std::make_unique<MockPlaybackSession>(_shared);
+                return std::make_unique<MockPlaybackSession>(_shared, _options.playbackFrameFile);
             }
 
         private:

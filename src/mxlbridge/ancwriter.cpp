@@ -34,7 +34,7 @@ namespace mxldl::mxlbridge
         }
     }
 
-    mxlStatus AncWriter::writePackets(std::uint64_t grainIndex, std::vector<util::AncPacket> const& packets)
+    mxlStatus AncWriter::writePackets(std::uint64_t grainIndex, std::vector<util::AncPacket> const& packets, std::uint8_t field)
     {
         mxlGrainInfo info{};
         std::uint8_t* payload = nullptr;
@@ -44,7 +44,7 @@ namespace mxldl::mxlbridge
             return status;
         }
 
-        auto const encoded = util::encodeRfc8331(packets, info.grainSize);
+        auto const encoded = util::encodeRfc8331(packets, info.grainSize, field);
         if (encoded.packetsDropped > 0)
         {
             log::warn("anc_packets_dropped",

@@ -19,6 +19,9 @@ namespace mxldl::config
         std::int64_t rateNumerator = 0; // frame rate (frames per second)
         std::int64_t rateDenominator = 1;
         bool interlaced = false;
+        // Interlaced only: the bottom field (odd frame lines) comes first in
+        // time (DeckLink bmdLowerFieldFirst: NTSC). Otherwise the top field.
+        bool bottomFieldFirst = false;
 
         [[nodiscard]] double fps() const
         {

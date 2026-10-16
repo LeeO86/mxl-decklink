@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: MIT
 #include "videowriter.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <stdexcept>
 
+#include "util/interlace.hpp"
 #include "util/logging.hpp"
 
 namespace mxldl::mxlbridge
@@ -65,6 +67,26 @@ namespace mxldl::mxlbridge
         info.validSlices = info.totalSlices;
         status = ::mxlFlowWriterCommitGrain(_writer, &info);
         return status;
+    }
+
+    mxlStatus VideoWriter::writeField(std::uint64_t grainIndex, std::uint8_t const* frameData, std::size_t frameRowBytes, std::uint32_t frameHeight,
+        unsigned parity)
+    {
+        mxlGrainInfo info{};
+        std::uint8_t* payload = nullptr;
+        auto status = ::mxlFlowWriterOpenGrain(_writer, grainIndex, &info, &payload);
+        if (status != MXL_STATUS_OK)
+        {
+            return status;
+        }
+        // The grain's v210 line length (slice 0); the fill rows come first.
+        // Never more rows than the grain holds (like writeFrame's cut).
+        std::size_t const lineBytes = _configInfo.discrete.sliceSizes[0];
+        auto const fieldRows = lineBytes > 0 ? std::min<std::size_t>(frameHeight / 2, info.grainSize / lineBytes) : 0;
+        util::extractField(frameData, frameRowBytes, static_cast<std::uint32_t>(fieldRows * 2), parity, payload, lineBytes);
+        info.flags = 0;
+        info.validSlices = info.totalSlices;
+        return ::mxlFlowWriterCommitGrain(_writer, &info);
     }
 
     mxlStatus VideoWriter::writeFrameWithKey(std::uint64_t grainIndex, std::uint8_t const* fill, std::size_t fillBytes, std::uint8_t const* key,
