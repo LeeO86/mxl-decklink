@@ -4,6 +4,7 @@
 // reads video and audio from different domains; and rides out a source stall
 // by repeating the last frame and playing silence, without a preroll reset.
 #include <algorithm>
+#include <cmath>
 #include <atomic>
 #include <chrono>
 #include <cstring>
@@ -110,6 +111,7 @@ namespace
         std::atomic<bool> keepBytes{false}; // keep the last scheduled frame's bytes
         std::vector<std::uint8_t> lastBytes;
         std::uint32_t audioSampleFrames = 0; // of the last audio block
+        std::vector<std::uint32_t> audioBlockSizes; // sample frames of every audio block
 
         /// Median of audio block - video grain over the pairs from `from`:
         /// constant while audio and video stay in sync.
@@ -249,6 +251,7 @@ namespace
             std::lock_guard const lock{_played->mutex};
             ++_played->audioBlocks;
             _played->audioSampleFrames = sampleFrames;
+            _played->audioBlockSizes.push_back(sampleFrames);
             _played->audioBlocksWithSound += sound ? 1 : 0;
             if (sound && !_played->grains.empty())
             {
@@ -1618,16 +1621,12 @@ TEST_CASE("an interlaced flow plays as woven frames at the frame rate, with a fr
         CHECK(scheduled / seconds == doctest::Approx(mode.fps()).epsilon(0.15));
         CHECK(rig.played->largestGrainStep(from) == 1);
         CHECK(rig.counter("mxl_decklink_frames_repeated_total", "reason", "source_late") == 0.0);
-        // 48 kHz / frame rate: 1920 samples at 25 frames/s, 1601 or 1602 at
-        // 29.97 (the integer part, as for progressive 59.94).
-        CHECK(rig.played->audioSampleFrames == static_cast<std::uint32_t>(48000 * mode.rateDenominator / mode.rateNumerator));
-        if (mode.rateDenominator == 1)
-        {
-            // Not at 29.97: the audio read position is frame index x
-            // samples per frame, which is off the TAI sample grid when the
-            // samples per frame are not whole (also for progressive 59.94).
-            CHECK(rig.played->soundBlocks() > 0);
-        }
+        // A frame's block on the TAI sample grid: 1920 samples at 25
+        // frames/s, 1601 or 1602 at 29.97.
+        auto const lo = static_cast<std::uint32_t>(48000 * mode.rateDenominator / mode.rateNumerator);
+        auto const last = rig.played->audioSampleFrames;
+        CHECK((last == lo || (mode.rateDenominator != 1 && last == lo + 1)));
+        CHECK(rig.played->soundBlocks() > 0);
 
         // The last frame shown: every line back in its place.
         std::lock_guard const lock{rig.played->mutex};
@@ -1647,5 +1646,73 @@ TEST_CASE("an interlaced flow plays as woven frames at the frame rate, with a fr
             }
         }
         CHECK(wrong == 0);
+    }
+}
+
+TEST_CASE("an output at 59.94 and 29.97 frames/s plays its audio: blocks on the TAI sample grid, 801/800 and 1602/1601 cadence, in sync")
+{
+    // Before 1.0.6 the audio read position was frame index x floor(48000 /
+    // rate) samples, days behind the TAI sample index at these rates: the
+    // output played silence for good.
+    for (char const* name : {"HD720p5994", "HD1080p2997"})
+    {
+        CAPTURE(name);
+        Rig rig(name);
+        auto const mode = *config::lookupVideoMode(name);
+        rig.video.width = mode.width;
+        rig.video.height = mode.height;
+        rig.video.rateNumerator = mode.rateNumerator;
+        rig.video.rateDenominator = mode.rateDenominator;
+        rig.ch.videoModeName = mode.name;
+        rig.ch.videoMode = mode;
+        rig.withAudio();
+        auto audio = std::make_unique<AudioSource>(*rig.domain, rig.audio, kStamped);
+        auto video = std::make_unique<VideoSource>(*rig.domain, rig.video, kGen1);
+        std::this_thread::sleep_for(200ms);
+
+        channel::OutputChannel out(rig.global, rig.ch, *rig.sub, *rig.domain, rig.metrics, "test");
+        out.start();
+        REQUIRE(waitUntil([&] { return out.status().state.load() == channel::State::Healthy; }, 3s));
+        REQUIRE(waitUntil([&] { return rig.played->pairCount() >= 60; }, 4s));
+        out.stop();
+
+        auto const perFrame = 48000.0 * static_cast<double>(mode.rateDenominator) / static_cast<double>(mode.rateNumerator);
+        std::lock_guard const lock{rig.played->mutex};
+        CHECK(rig.played->audioBlocksWithSound >= 60);
+        // Every block is 800/801 resp. 1601/1602 samples, 4004 resp. 8008 per 5.
+        auto const lo = static_cast<std::uint32_t>(perFrame);
+        auto const& sizes = rig.played->audioBlockSizes;
+        REQUIRE(sizes.size() >= 60);
+        std::size_t wrongSize = 0;
+        for (auto const n : sizes)
+        {
+            wrongSize += (n == lo || n == lo + 1) ? 0 : 1;
+        }
+        CHECK(wrongSize == 0);
+        std::uint64_t sum = 0;
+        for (std::size_t i = sizes.size() - 50; i < sizes.size(); ++i)
+        {
+            sum += sizes[i];
+        }
+        CHECK(static_cast<double>(sum) == doctest::Approx(50 * perFrame).epsilon(0.001));
+        // In sync: the first sample's 20 ms block number, in frames, less
+        // the frame shown stays the same (within a frame: the stamp has
+        // 20 ms steps).
+        std::vector<std::int64_t> d;
+        for (auto const& [block, grain] : rig.played->avPairs)
+        {
+            d.push_back(static_cast<std::int64_t>(std::llround(static_cast<double>(block) * 960.0 / perFrame)) - grain);
+        }
+        auto sorted = d;
+        std::sort(sorted.begin(), sorted.end());
+        auto const median = sorted[sorted.size() / 2];
+        std::size_t off = 0;
+        for (auto const x : d)
+        {
+            off += std::llabs(x - median) <= 1 ? 0 : 1;
+        }
+        CHECK(off <= d.size() / 10);
+        audio.reset();
+        video.reset();
     }
 }

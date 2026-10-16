@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: MIT
 #include <cmath>
 #include <limits>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 #include <doctest/doctest.h>
+#include <mxl/time.h>
 
 #include "util/audioconv.hpp"
 
@@ -145,4 +148,45 @@ TEST_CASE("mapped interleave writes into selected DeckLink channels")
     CHECK(dst[1] == 1073741824);
     CHECK(dst[2] == 7);
     CHECK(dst[3] == -1073741824);
+}
+
+TEST_CASE("audio block of a frame on the TAI grid: whole rates unchanged, 29.97 / 59.94 cadence")
+{
+    // At today's TAI frame indexes (the math must hold there, not only near 0).
+    // Whole samples per frame: exactly k x (48000 / rate), as before.
+    for (auto const& [rate, perFrame] : {std::pair{mxlRational{25, 1}, 1920ULL}, std::pair{mxlRational{50, 1}, 960ULL},
+             std::pair{mxlRational{24, 1}, 2000ULL}, std::pair{mxlRational{30, 1}, 1600ULL}, std::pair{mxlRational{60, 1}, 800ULL},
+             std::pair{mxlRational{24000, 1001}, 2002ULL}})
+    {
+        CAPTURE(rate.numerator);
+        auto const k0 = ::mxlGetCurrentIndex(&rate);
+        for (std::uint64_t k = k0; k < k0 + 1000; ++k)
+        {
+            REQUIRE(audioSampleIndexOfFrame(rate, k) == k * perFrame);
+        }
+        CHECK(maxAudioSamplesPerFrame(rate) == perFrame);
+    }
+
+    // Not whole: the 5-frame cadence, 8008 resp. 4004 samples per 5 frames,
+    // each block 1601/1602 resp. 800/801, and the index on the TAI grid.
+    for (auto const& [rate, lo, five] : {std::tuple{mxlRational{30000, 1001}, 1601ULL, 8008ULL}, std::tuple{mxlRational{60000, 1001}, 800ULL, 4004ULL}})
+    {
+        CAPTURE(rate.numerator);
+        mxlRational const audio{48000, 1};
+        auto const k0 = ::mxlGetCurrentIndex(&rate);
+        for (std::uint64_t k = k0; k < k0 + 1000; ++k)
+        {
+            auto const block = audioSampleIndexOfFrame(rate, k + 1) - audioSampleIndexOfFrame(rate, k);
+            REQUIRE((block == lo || block == lo + 1));
+            REQUIRE(audioSampleIndexOfFrame(rate, k + 5) - audioSampleIndexOfFrame(rate, k) == five);
+            REQUIRE(audioSampleIndexOfFrame(rate, k) == ::mxlTimestampToIndex(&audio, ::mxlIndexToTimestamp(&rate, k)));
+        }
+        CHECK(maxAudioSamplesPerFrame(rate) == lo + 1);
+        // Within a sample of the TAI time; frame index x floor(48000 /
+        // rate) is days away from it.
+        auto const tai = ::mxlIndexToTimestamp(&rate, k0);
+        auto const exact = static_cast<double>(tai) * 48e-6;
+        CHECK(std::abs(static_cast<double>(audioSampleIndexOfFrame(rate, k0)) - exact) <= 1.0);
+        CHECK(std::abs(static_cast<double>(k0 * lo) - exact) > 48000.0 * 86400);
+    }
 }

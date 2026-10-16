@@ -1,11 +1,26 @@
 // SPDX-License-Identifier: MIT
 #include "audioconv.hpp"
 
+#include <mxl/time.h>
+
 #include <cmath>
 #include <limits>
 
 namespace mxldl::util
 {
+    std::uint64_t audioSampleIndexOfFrame(mxlRational const& frameRate, std::uint64_t frame)
+    {
+        mxlRational const audioRate{48000, 1};
+        return ::mxlTimestampToIndex(&audioRate, ::mxlIndexToTimestamp(&frameRate, frame));
+    }
+
+    std::size_t maxAudioSamplesPerFrame(mxlRational const& frameRate)
+    {
+        auto const num = 48000ULL * static_cast<std::uint64_t>(frameRate.denominator);
+        auto const den = static_cast<std::uint64_t>(frameRate.numerator);
+        return static_cast<std::size_t>((num + den - 1) / den);
+    }
+
     namespace
     {
         // §2.3: float32 = int32 / 2147483648.0f; the int16 variant scales by 2^15.
