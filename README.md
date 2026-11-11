@@ -5,6 +5,10 @@ bridge between DeckLink capture/playback hardware (SDI and IP) and the
 [Media eXchange Layer](https://github.com/dmf-mxl/mxl) (MXL) shared-memory
 data plane of the EBU/Linux Foundation Dynamic Media Facility.
 
+Part of [mxl-stack](https://github.com/LeeO86/mxl-stack), a collection of open-source MXL media functions with Docker Compose and Kubernetes examples.
+
+![mxl-decklink dashboard with an input and an output channel (mock card)](docs/images/web-ui.png)
+
 One container process exclusively owns **one physical DeckLink card** and
 serves **1..16 logical channels** on it — input channels (`DeckLink → MXL`)
 and output channels (`MXL → DeckLink`) in any combination. See
